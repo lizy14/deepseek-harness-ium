@@ -87,6 +87,8 @@ export function buildEnvironment(extra = {}) {
     TEMP: temporary,
     TMP: temporary,
     TMPDIR: temporary,
+    // Runtime checks must not bake the build host's paths into distributable bytecode.
+    PYTHONDONTWRITEBYTECODE: '1',
     DSH_HOME: path.join(work, 'build-home'),
     IUM_DSH_HOME: path.join(work, 'build-home'),
     IUM_USER_DATA_DIR: path.join(work, 'build-user-data'),

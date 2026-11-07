@@ -21,6 +21,8 @@
         "apps/desktop/tests/main-startup.spec.ts",
         "apps/desktop/tests/package-macos.spec.ts",
         "package.json",
+        "packages/client/tsdown.client.ts",
+        "scripts/client-bundle-purity.spec.ts",
         "scripts/ci-workflow.spec.ts",
         "scripts/compile-referenced-projects.spec.ts",
         "scripts/compile-referenced-projects.ts",
