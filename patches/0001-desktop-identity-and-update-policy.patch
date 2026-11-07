@@ -941,6 +941,19 @@ index c4f130943ddfee2d8d8040c6dd679f5b0e12312a..472fd8447f8e0d9d20b1bfb9c3f1abe0
      "clean": "tsx scripts/clean.ts",
      "change-scope": "tsx scripts/change-scope.ts",
      "typecheck": "tsx scripts/build.ts --scope typecheck",
+diff --git a/packages/client/tsdown.client.ts b/packages/client/tsdown.client.ts
+index 5eaf0b2a35a354080b03d6fcae7d5421bf09cca5..34920559ae72f22239a050e42f4ceb51d939e461 100644
+--- a/packages/client/tsdown.client.ts
++++ b/packages/client/tsdown.client.ts
+@@ -812,6 +812,8 @@ function clientConfig(
+     // a CJS bundle cannot carry) resolve their static flavor matching the
+     // NODE_ENV the defines below bake in.
+     inputOptions: {
++      // Virtual stylesheet ids contain physical paths; do not publish them as source-region comments.
++      experimental: { attachDebugInfo: 'none' },
+       resolve: {
+         conditionNames: [
+           (process.env.NODE_ENV ?? 'production') === 'development' ? 'development' : 'production',
 diff --git a/scripts/ci-workflow.spec.ts b/scripts/ci-workflow.spec.ts
 index 26d13714c173aaea7ef89bcc2192cd8edf0e9e96..cdf905caff590054de2be1697400e2f85c5f597f 100644
 --- a/scripts/ci-workflow.spec.ts
@@ -954,6 +967,64 @@ index 26d13714c173aaea7ef89bcc2192cd8edf0e9e96..cdf905caff590054de2be1697400e2f8
      expect(scripts.scripts['build:lib:client']).toContain('tsc -b tsconfig.client.json')
      expect(scripts.scripts.typecheck).toBe('tsx scripts/build.ts --scope typecheck')
    })
+diff --git a/scripts/client-bundle-purity.spec.ts b/scripts/client-bundle-purity.spec.ts
+index 66437b8f69a15e5cea012fca72593cae1e6202fa..fc1640c26ba5c02c51da2faa6eccee9b0436b09f 100644
+--- a/scripts/client-bundle-purity.spec.ts
++++ b/scripts/client-bundle-purity.spec.ts
+@@ -125,6 +125,53 @@ async function clientChunkOutput(root: string, config: UserConfig, fileName: str
+   }
+ }
+ 
++describe('client bundle source-region comments', () => {
++  it('omits physical source labels while retaining licenses and factory behavior', async () => {
++    const root = mkdtempSync(join(tmpdir(), 'dsh-client-source-labels-'))
++    onTestFinished(() => { rmSync(root, { recursive: true, force: true }) })
++    const entry = join(root, 'lib/types/client/index.js')
++    mkdirSync(dirname(entry), { recursive: true })
++    writeFileSync(join(root, 'package.json'), JSON.stringify({ name: REQUESTING_PACKAGE, type: 'module' }))
++    writeFileSync(entry, [
++      '/*! @license Region fixture (MIT) */',
++      'import styles from "./fixture.module.css"',
++      'export const answer = 6 * 7',
++      'export const className = styles.fixture',
++      '',
++    ].join('\n'))
++    writeFileSync(join(dirname(entry), 'fixture.module.css'), '.fixture { color: red }\n')
++    const config = clientConfigs(root)[0]
++    if (config === undefined || typeof config.inputOptions !== 'object') throw new Error('client input options missing')
++    expect(config.inputOptions.experimental?.attachDebugInfo).toBe('none')
++
++    const labeled = await clientChunkOutput(root, {
++      ...config,
++      inputOptions: {
++        ...config.inputOptions,
++        experimental: { ...config.inputOptions.experimental, attachDebugInfo: 'simple' },
++      },
++    }, 'client.js')
++    expect(labeled).toMatch(/\/\/#region[^\r\n]*fixture\.module\.css/)
++    expect(labeled.split('\n').some(line => line.includes(root) || line.includes(root.replaceAll('\\', '/')))).toBe(true)
++    const output = await clientChunkOutput(root, config, 'client.js')
++    expect(output).not.toMatch(/\/\/#(?:end)?region\b/)
++    expect(output).not.toContain(root)
++    expect(output).not.toContain(root.replaceAll('\\', '/'))
++    expect(output).toContain('@license Region fixture (MIT)')
++
++    const execute = (code: string) => {
++      let value: { answer: number; className: string } | undefined
++      const loader = { load: (registration: { factory: (require: (id: string) => never) => { answer: number; className: string } }) => {
++        value = registration.factory((id) => { throw new Error(`Unexpected fixture request: ${id}`) })
++      } }
++      new Function('window', 'document', code)({ __ModuleLoader__: loader }, undefined)
++      return value
++    }
++    expect(execute(output)).toEqual(execute(labeled))
++    expect(execute(output)).toMatchObject({ answer: 42, className: expect.any(String) })
++  })
++})
++
+ describe('statically linked client build modes', () => {
+   it.each([
+     { label: 'defaults to production', mode: undefined, expectedMode: 'production', frozen: false },
 diff --git a/scripts/compile-referenced-projects.spec.ts b/scripts/compile-referenced-projects.spec.ts
 index b1f74ea2fd416192fe0113f08b7bf0d814e889a2..e17e056cd66c01950f4e7e8d764166f81a886f7d 100644
 --- a/scripts/compile-referenced-projects.spec.ts

@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createPolicyAudit } from '../overlays/desktop/ium-audit.mjs';
+import { buildEnvironment } from '../scripts/lib.mjs';
 
 const base = fileURLToPath(new URL('../.work/audit-tests/', import.meta.url));
 fs.mkdirSync(base, { recursive: true });
@@ -39,4 +40,11 @@ test('audit stops appending at its local capacity limit', t => {
 
 test('audit refuses an implicit relative data directory', () => {
   assert.throws(() => createPolicyAudit('.dsh'), /absolute Harness home/);
+});
+
+test('build checks do not generate distributable Python bytecode with host paths', () => {
+  const previous = process.env.PYTHONDONTWRITEBYTECODE;
+  const env = buildEnvironment();
+  assert.equal(env.PYTHONDONTWRITEBYTECODE, '1');
+  assert.equal(process.env.PYTHONDONTWRITEBYTECODE, previous);
 });
