@@ -1,0 +1,8 @@
+* text=auto eol=lf
+# Unified diff context lines contain a required leading space, including blank lines.
+# Applied source additions remain checked with git apply --whitespace=error-all.
+*.patch whitespace=-blank-at-eol
+*.png binary
+*.ico binary
+*.zip binary
+*.exe binary

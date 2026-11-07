@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "version": "0.2.2-rc.1.20261107.1",
+  "target": "win-x64",
+  "edition": "work-no-deepseek",
+  "signing": "unsigned",
+  "status": "unpublished-candidate",
+  "automaticPublication": false
+}

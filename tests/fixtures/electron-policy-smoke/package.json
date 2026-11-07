@@ -1,0 +1,7 @@
+{
+  "name": "ium-network-policy-native-smoke",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "main.mjs"
+}

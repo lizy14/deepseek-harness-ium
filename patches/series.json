@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "patches": [
+    "0001-desktop-identity-and-update-policy.patch",
+    "0002-early-network-policy-and-profile.patch"
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "edition": "work-no-deepseek",
+  "identity": {
+    "appId": "io.github.lizy14.dshium",
+    "packageName": "@lizy14/dsh-desktop-ium",
+    "productName": "DSH Ium",
+    "protocol": "dsh-ium",
+    "homeDirectoryName": ".dsh-ium",
+    "userDataDirectoryName": "@lizy14/dsh-desktop-ium"
+  },
+  "initialModel": {
+    "provider": "github-copilot",
+    "model": "gpt-4.1"
+  },
+  "registryEnvironment": "IUM_NPM_REGISTRY",
+  "networkPolicy": "deny-deepseek-domains-v1"
+}

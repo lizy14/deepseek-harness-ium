@@ -1,0 +1,1029 @@
+diff --git a/apps/desktop/electron-builder.config.d.mts b/apps/desktop/electron-builder.config.d.mts
+index 2973a6eaccbe3dff5fe807b4ea9bb4f6cad46352..97da22444a228181ade8625913b6d054ba316814 100644
+--- a/apps/desktop/electron-builder.config.d.mts
++++ b/apps/desktop/electron-builder.config.d.mts
+@@ -3,9 +3,10 @@ import type { AfterPackContext, BeforePackContext } from 'app-builder-lib'
+ /** Electron-builder fields asserted by the Desktop release tests. */
+ export interface DesktopElectronBuilderConfig {
+   readonly appId: string
++  readonly productName: 'DSH Ium'
+   readonly copyright: string
+   readonly artifactName: string
+-  readonly protocols: readonly [{ readonly name: 'DeepSeek Harness'; readonly schemes: readonly ['dsh'] }]
++  readonly protocols: readonly []
+   readonly directories: {
+     readonly output: string
+   }
+diff --git a/apps/desktop/package.json b/apps/desktop/package.json
+index 00eee14411214e690d598a60b44a0509d94b7e40..7e7a6c88c1041d593cb9a94eea4f4098ce4d3bba 100644
+--- a/apps/desktop/package.json
++++ b/apps/desktop/package.json
+@@ -1,14 +1,20 @@
+ {
+-  "name": "@deepseek-ai/dsh-desktop",
+-  "description": "Electron desktop shell for a bundled dsh runtime and external plugins",
++  "name": "@lizy14/dsh-desktop-ium",
++  "description": "DSH Ium: unofficial downstream Desktop build of DeepSeek Harness",
+   "version": "0.2.2-rc.1",
+   "private": true,
+   "license": "MIT",
+   "author": {
+-    "name": "Hangzhou DeepSeek Artificial Intelligence Co., Ltd."
++    "name": "lizy14 (unofficial downstream maintainer)"
+   },
++  "contributors": [
++    {
++      "name": "Hangzhou DeepSeek Artificial Intelligence Co., Ltd. (upstream)"
++    }
++  ],
+   "type": "module",
+-  "main": "lib/main.js",
++  "main": "lib/ium-bootstrap.js",
++  "dshDesktopAppId": "io.github.lizy14.dshium",
+   "scripts": {
+     "test:installer": "node scripts/test-windows-installer.mjs",
+     "build": "tsc -b && pnpm run bundle",
+@@ -49,6 +55,7 @@
+   "dependencies": {
+     "electron-updater": "^6.8.9",
+     "semver": "^7.8.5",
++    "undici": "7.29.1",
+     "ws": "^8.21.3",
+     "@deepseek-ai/dsh-api-gateway": "workspace:*",
+     "@deepseek-ai/cordis": "workspace:~"
+diff --git a/apps/desktop/scripts/desktop-package-environment.mjs b/apps/desktop/scripts/desktop-package-environment.mjs
+index 27a7f92c7f17c25b291f790d759988fc50fa7bcd..aa3f194e9dbb922fffe5335019fd491bcc858e56 100644
+--- a/apps/desktop/scripts/desktop-package-environment.mjs
++++ b/apps/desktop/scripts/desktop-package-environment.mjs
+@@ -24,12 +24,12 @@ const FILE_SETTINGS = ['DSH_DESKTOP_WINDOWS_CER_FILE', 'DSH_DESKTOP_WINDOWS_SIGN
+ /**
+  * Select local macOS test defaults without reading dotenv files or inheriting release settings.
+  * @param {NodeJS.ProcessEnv} environment Parent environment, retained for build tools and networking.
+- * @returns {NodeJS.ProcessEnv} Unsigned build environment with the standard application identifier and no update policy.
++ * @returns {NodeJS.ProcessEnv} Unsigned build environment with the downstream application identifier and no update policy.
+  */
+ export function localMacOSPackageEnvironment(environment = process.env) {
+   return {
+     ...Object.fromEntries(Object.entries(environment).filter(([name]) => !AMBIENT_RELEASE_SETTING.test(name))),
+-    DSH_DESKTOP_APP_ID: 'com.deepseek.harness',
++    DSH_DESKTOP_APP_ID: 'io.github.lizy14.dshium',
+     DSH_DESKTOP_UNSIGNED: '1',
+   }
+ }
+@@ -156,7 +156,7 @@ export function validateDesktopPackageEnvironment(environment, target, options =
+   resolveDesktopTargetBuildPaths(environment, target.platform, target.arch)
+   resolveDesktopAppId(environment)
+   resolveNpmRegistry(environment)
+-  if (target.platform !== 'darwin' || !options.unsigned) resolveDesktopPolicyEnvironment(environment)
++  if (!options.unsigned) resolveDesktopPolicyEnvironment(environment)
+   if (target.platform === 'darwin') resolveMacOSPackageSettings(environment)
+   else resolveWindowsPackageSettings(environment)
+   if (options.unsigned) return
+diff --git a/apps/desktop/scripts/desktop-release-environment.d.mts b/apps/desktop/scripts/desktop-release-environment.d.mts
+index 26190ab2b8f113366d9dc38b5c25d21c02e2161a..7dc2d4ac6f5d7fcc2255dac8cfec703211f4af94 100644
+--- a/apps/desktop/scripts/desktop-release-environment.d.mts
++++ b/apps/desktop/scripts/desktop-release-environment.d.mts
+@@ -7,7 +7,7 @@ export const MACOS_SIGNING_IDENTITY_ENV: 'DSH_DESKTOP_MACOS_SIGNING_IDENTITY'
+ /** Environment variable that supplies the expected Apple Developer Team ID. */
+ export const MACOS_TEAM_ID_ENV: 'DSH_DESKTOP_MACOS_TEAM_ID'
+ 
+-/** Environment variable that selects the npm registry used for the bundled runtime install. */
++/** Environment variable that selects the HTTPS npm registry base URL for the bundled runtime install. */
+ export const NPM_REGISTRY_ENV: 'DSH_DESKTOP_NPM_REGISTRY'
+ 
+ /** Public identity expected on a macOS release. */
+@@ -52,7 +52,7 @@ export function resolveDesktopAppId(env: NodeJS.ProcessEnv): string
+ /**
+  * Resolve the npm registry used to materialize the bundled runtime and its external dependencies.
+  * @param env - Packaging environment.
+- * @returns Registry origin; the public registry unless a local mirror is configured.
++ * @returns Public registry when unset; otherwise an HTTPS origin or a slash-terminated registry base URL retaining its path prefix, without credentials, query, or fragment.
+  */
+ export function resolveNpmRegistry(env: NodeJS.ProcessEnv): string
+ 
+diff --git a/apps/desktop/scripts/desktop-release-environment.mjs b/apps/desktop/scripts/desktop-release-environment.mjs
+index 635a57a3c9cab8848eadb9fb302d26117d4fb475..06361cb189edac78f721813d8254ac3a2f3ad64d 100644
+--- a/apps/desktop/scripts/desktop-release-environment.mjs
++++ b/apps/desktop/scripts/desktop-release-environment.mjs
+@@ -9,7 +9,7 @@ export const MACOS_SIGNING_IDENTITY_ENV = 'DSH_DESKTOP_MACOS_SIGNING_IDENTITY'
+ /** Environment variable that supplies the expected Apple Developer Team ID. */
+ export const MACOS_TEAM_ID_ENV = 'DSH_DESKTOP_MACOS_TEAM_ID'
+ 
+-/** Environment variable that selects the npm registry used for the bundled runtime install. */
++/** Environment variable that selects the HTTPS npm registry base URL for the bundled runtime install. */
+ export const NPM_REGISTRY_ENV = 'DSH_DESKTOP_NPM_REGISTRY'
+ 
+ const DEFAULT_NPM_REGISTRY = 'https://registry.npmjs.org/'
+@@ -40,19 +40,20 @@ function requireEnvironmentValue(env, name) {
+ /**
+  * Resolve the npm registry used to materialize the bundled runtime and its external dependencies.
+  * @param {NodeJS.ProcessEnv} env - Packaging environment.
+- * @returns {string} Registry origin; the public registry unless a local mirror is configured.
++ * @returns {string} Public registry when unset; otherwise an HTTPS origin or a slash-terminated registry base URL retaining its path prefix, without credentials, query, or fragment.
+  */
+ export function resolveNpmRegistry(env) {
+   const configured = env[NPM_REGISTRY_ENV]?.trim() ?? ''
+   if (configured === '') return DEFAULT_NPM_REGISTRY
+   let url
+   try { url = new URL(configured) }
+-  catch { throw new Error(`desktop release environment: ${NPM_REGISTRY_ENV} must be an HTTPS origin`) }
+-  if (url.protocol !== 'https:' || url.username !== '' || url.password !== '' || url.search !== '' || url.hash !== ''
+-    || (url.pathname !== '/' && url.pathname !== '')) {
+-    throw new Error(`desktop release environment: ${NPM_REGISTRY_ENV} must be an HTTPS origin without credentials, path, query, or fragment`)
++  catch { throw new Error(`desktop release environment: ${NPM_REGISTRY_ENV} must be an HTTPS registry base URL`) }
++  if (url.protocol !== 'https:' || url.username !== '' || url.password !== '' || url.href.includes('?') || url.href.includes('#')) {
++    throw new Error(`desktop release environment: ${NPM_REGISTRY_ENV} must be an HTTPS registry base URL without credentials, query, or fragment`)
+   }
+-  return url.origin
++  if (url.pathname === '/') return url.origin
++  if (!url.pathname.endsWith('/')) url.pathname += '/'
++  return url.href
+ }
+ 
+ /**
+diff --git a/apps/desktop/scripts/electron-builder-config.mjs b/apps/desktop/scripts/electron-builder-config.mjs
+index cf0c19e8952f7ce1b5d987e7bb51723fc7a58ea3..bea3c2eb6fa7bc608b3b6e4c1b4084992addd30c 100644
+--- a/apps/desktop/scripts/electron-builder-config.mjs
++++ b/apps/desktop/scripts/electron-builder-config.mjs
+@@ -66,7 +66,7 @@ export function createElectronBuilderConfig(
+   if (skipNotarization && (unsigned || resolvedPlatform !== 'darwin')) throw new Error('Skipping notarization requires a signed macOS build')
+   const packagesMacOS = targetPlatform === 'darwin' || (targetPlatform === undefined && hostPlatform === 'darwin')
+   const packagesWindows = resolvedPlatform === 'win32'
+-  const policy = packagesMacOS && unsigned ? undefined : resolveDesktopPolicyEnvironment(env)
++  const policy = unsigned ? undefined : resolveDesktopPolicyEnvironment(env)
+   if (resolvedPlatform === 'win32') installWindowsDirectoryInstaller()
+   const macOSSigning = packagesMacOS && !unsigned ? resolveMacOSSigningEnvironment(env) : undefined
+   if (packagesMacOS && !unsigned && !skipNotarization) resolveMacOSNotarizationEnvironment(env)
+@@ -106,7 +106,8 @@ export function createElectronBuilderConfig(
+   const packaged = resolveDesktopBuildCommit(env)
+   return {
+     appId,
+-    protocols: [{ name: 'DeepSeek Harness', schemes: ['dsh'] }],
++    // Ium does not take ownership of the upstream application's OS protocol.
++    protocols: [],
+     extraMetadata: {
+       dshDesktopAppId: appId,
+       dshDesktopUpdateChannel: update?.channel ?? 'nightly',
+@@ -114,7 +115,7 @@ export function createElectronBuilderConfig(
+       ...buildVersion === productVersion ? {} : { version: buildVersion },
+       ...packaged === undefined ? {} : { dshBuildCommit: packaged.commit, dshBuildDirty: packaged.dirty },
+     },
+-    productName: 'DeepSeek Harness',
++    productName: 'DSH Ium',
+     // The default copyright uses author.name; this line names the product instead.
+     copyright: `Copyright © ${new Date().getFullYear()} \${productName}`,
+     // Unsigned builds carry their own suffix so a shared file can never pass for a release artifact.
+@@ -138,6 +139,9 @@ export function createElectronBuilderConfig(
+       return true
+     },
+     files: [
++      'lib/ium-bootstrap.js',
++      'lib/ium-node-preload.js',
++      'lib/ium-*.js',
+       'lib/main.js',
+       'lib/operation-report-worker.js',
+       'lib/welcome/**/*',
+diff --git a/apps/desktop/scripts/package-macos.ts b/apps/desktop/scripts/package-macos.ts
+index 4ba0fd12ca8cff27d3c4f1e085cd6022cc66dc1a..5c43ce8e73c1ebc63accaf2c703a6f3e04696671 100644
+--- a/apps/desktop/scripts/package-macos.ts
++++ b/apps/desktop/scripts/package-macos.ts
+@@ -78,7 +78,7 @@ export async function packageMacOSArtifacts(
+   const expected = resolveMacOSSigningEnvironment(environment)
+   const credentials = resolveMacOSNotarizationEnvironment(environment)
+   const update = resolveDesktopAutoUpdateConfig(environment, 'darwin', arch)
+-  const appPath = join(artifactsRoot, arch === 'arm64' ? 'mac-arm64' : 'mac', 'DeepSeek Harness.app')
++  const appPath = join(artifactsRoot, arch === 'arm64' ? 'mac-arm64' : 'mac', 'DSH Ium.app')
+   const root = await mkdtemp(join(dirname(artifactsRoot), 'notarization-'))
+   const zipApp = join(root, 'zip', basename(appPath))
+   const dmgApp = join(root, 'dmg', basename(appPath))
+diff --git a/apps/desktop/scripts/package-target.ts b/apps/desktop/scripts/package-target.ts
+index b6bc6efb6370e6a795c2a3c8d4bf726da6575bc1..b2ecbc3c2f818ccea6a54a655d3f57696d7d81ec 100644
+--- a/apps/desktop/scripts/package-target.ts
++++ b/apps/desktop/scripts/package-target.ts
+@@ -545,13 +545,13 @@ export async function packageTarget(
+   } else if (target.platform === 'darwin' && !invocation.unsigned && !invocation.skipNotarization) {
+     await execute([...desktopElectronBuilderArguments(target, true), '--config.mac.notarize=false'], electronBuilderEnv)
+     await execute(['exec', 'tsx', 'scripts/smoke-packaged-runtime.ts'], targetEnv)
+-    const appPath = join(buildPaths.artifacts, target.arch === 'arm64' ? 'mac-arm64' : 'mac', 'DeepSeek Harness.app')
++    const appPath = join(buildPaths.artifacts, target.arch === 'arm64' ? 'mac-arm64' : 'mac', 'DSH Ium.app')
+     await withMacOSNotarizationProxy(mac?.notarizationProxy,
+       () => notarizeMacOS({ appPath, ...resolveMacOSNotarizationEnvironment(environment) }), undefined, undefined, proxyEvent)
+   } else {
+     if (target.platform === 'darwin' && invocation.skipNotarization && !invocation.directory) {
+       await execute(desktopElectronBuilderArguments(target, true), electronBuilderEnv)
+-      const appPath = join(artifactsRoot, target.arch === 'arm64' ? 'mac-arm64' : 'mac', 'DeepSeek Harness.app')
++      const appPath = join(artifactsRoot, target.arch === 'arm64' ? 'mac-arm64' : 'mac', 'DSH Ium.app')
+       for (const format of ['dmg', 'zip'] as const) {
+         await buildMacArtifact({ format, appPath, output: artifactsRoot })
+       }
+diff --git a/apps/desktop/scripts/smoke-packaged-runtime.ts b/apps/desktop/scripts/smoke-packaged-runtime.ts
+index 6c3c12c8572593a1f038ed39f4ff3da898cecf70..b5ea0f415491f2c2cee5d6e0eb51edd29600af61 100644
+--- a/apps/desktop/scripts/smoke-packaged-runtime.ts
++++ b/apps/desktop/scripts/smoke-packaged-runtime.ts
+@@ -13,9 +13,9 @@ const target = resolveDesktopBuildTarget()
+ const windows = target === 'win-x64'
+ const artifacts = desktopArtifactOutput(paths, { unsigned: values.unsigned, skipNotarization: values['skip-notarization'] }).directory
+ const application = windows ? join(artifacts, 'win-unpacked')
+-  : join(artifacts, target === 'mac-arm64' ? 'mac-arm64' : 'mac', 'DeepSeek Harness.app', 'Contents')
++  : join(artifacts, target === 'mac-arm64' ? 'mac-arm64' : 'mac', 'DSH Ium.app', 'Contents')
+ const resources = join(application, windows ? 'resources' : 'Resources')
+-const executable = windows ? join(application, 'DeepSeek Harness.exe') : join(application, 'MacOS', 'DeepSeek Harness')
++const executable = windows ? join(application, 'DSH Ium.exe') : join(application, 'MacOS', 'DSH Ium')
+ const descriptor = await verifyDesktopRuntime(paths.dsh, readDesktopRuntime(paths.dsh).release.version,
+   resolveDesktopPackageTarget(target))
+ if (windows && !values.unsigned) await verifyWindowsCode(application)
+diff --git a/apps/desktop/scripts/verify-retained-desktop.ts b/apps/desktop/scripts/verify-retained-desktop.ts
+index 613580da9a7d140cd1cfbbef050393f07e5ea0f0..eb825599e2433ff2a4243579b1d4387046479f2b 100644
+--- a/apps/desktop/scripts/verify-retained-desktop.ts
++++ b/apps/desktop/scripts/verify-retained-desktop.ts
+@@ -39,6 +39,6 @@ export async function verifyRetainedDesktopSignatures(
+   const extracted = await mkdtemp(join(tmpdir(), 'desktop-publish-verify-'))
+   try {
+     run('/usr/bin/ditto', ['-x', '-k', zipPath, extracted])
+-    verifyMacOSNotarizedApplication(join(extracted, 'DeepSeek Harness.app'), config.macOS)
++    verifyMacOSNotarizedApplication(join(extracted, 'DSH Ium.app'), config.macOS)
+   } finally { await rm(extracted, { recursive: true, force: true }) }
+ }
+diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
+index d8d0e30c4c73d6c2e839de60d1b6c04708457c61..c12ec222ca7c5f75b6577788d4ea88c3ff1d3cb4 100644
+--- a/apps/desktop/src/main.ts
++++ b/apps/desktop/src/main.ts
+@@ -182,17 +182,25 @@ function reportFatal(error: unknown, source: CrashReportSource): void {
+   })
+ }
+ 
+-protocol.registerSchemesAsPrivileged([{
+-  scheme: SCHEME,
+-  privileges: {
+-    standard: true,
+-    secure: true,
+-    supportFetchAPI: true,
+-    corsEnabled: true,
+-    stream: true,
+-    codeCache: true,
+-  },
+-}])
++/** Fixed package identity used by both Electron startup and the packaged manifest. */
++function isIumPackageName(name: unknown): boolean {
++  return name === '@lizy14/dsh-desktop-ium'
++}
++
++// Ium's bootstrap registers privileges synchronously before its first await.
++if (!isIumPackageName(app.name)) {
++  protocol.registerSchemesAsPrivileged([{
++    scheme: SCHEME,
++    privileges: {
++      standard: true,
++      secure: true,
++      supportFetchAPI: true,
++      corsEnabled: true,
++      stream: true,
++      codeCache: true,
++    },
++  }])
++}
+ 
+ interface RuntimeResources {
+   readonly nodeBin: string
+@@ -256,6 +264,13 @@ function platformLoginUrl(authorizeUrl: string): string {
+   return url.href
+ }
+ 
++/** Open user-selected links without leaking URLs or leaving policy denials unhandled. */
++function openExternalLink(url: string): void {
++  void shell.openExternal(url).catch((_error: unknown) => {
++    console.warn('desktop: external link could not be opened')
++  })
++}
++
+ function createWindow(preload: string, show = false, primary = false): BrowserWindow {
+   const window = new BrowserWindow({
+     width: 1280,
+@@ -290,7 +305,7 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
+     },
+   })
+   window.webContents.setWindowOpenHandler(({ url }) => {
+-    if (['http:', 'https:'].includes(new URL(url).protocol)) void shell.openExternal(url)
++    if (['http:', 'https:'].includes(new URL(url).protocol)) openExternalLink(url)
+     return { action: 'deny' }
+   })
+   if (process.platform === 'darwin' || process.platform === 'win32') {
+@@ -359,7 +374,7 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
+     if (destination.protocol !== `${SCHEME}:`
+       && !(destination.protocol === 'http:' && destination.origin === current.origin)) {
+       event.preventDefault()
+-      if (['http:', 'https:'].includes(destination.protocol)) void shell.openExternal(url)
++      if (['http:', 'https:'].includes(destination.protocol)) openExternalLink(url)
+     }
+   })
+   return window
+@@ -525,7 +540,7 @@ async function main(): Promise<void> {
+           segmentBytes: 256 * 1024, recordBytes: 4096, queuedBytes: 64 * 1024,
+         })
+         operationJournal.enqueue(JSON.stringify(record))
+-      })
++      }, new URL('./ium-node-preload.js', import.meta.url).href)
+     return {
+       start: async () => {
+         const ready = await host.start()
+@@ -534,12 +549,12 @@ async function main(): Promise<void> {
+         if (ready.injections === undefined) throw new Error('Desktop Host did not provide boot injections')
+         injections = ready.injections
+         welcomeBackend = await connectDesktopWelcome(ready.url, (input, init) => net.fetch(input, init), async () => (await session.defaultSession.cookies.get({ url: ready.url })).map(cookie => `${cookie.name}=${cookie.value}`).join('; '))
+-        analyticsEnabled = await welcomeBackend.analyticsEnabled().catch(() => false)
++        analyticsEnabled = !isIumBuild && await welcomeBackend.analyticsEnabled().catch(() => false)
+         if (!reportedLaunch) { reportedLaunch = true; void track('desktop_app_launch', {}) }
+         stopAccount?.()
+         const accountBackend = welcomeBackend.account
+         stopAccount = accountBackend.watch((state) => {
+-          if (quitting) return
++          if (quitting || isIumBuild) return
+           if (welcomeWindow !== undefined && !welcomeWindow.isDestroyed()) welcomeWindow.webContents.send(WELCOME_IPC.state, state)
+           const attempt = state.attempt
+           if (attempt?.phase === 'waiting-browser' && attempt.authorizeUrl !== undefined && openedAttempt !== attempt.id) {
+@@ -565,6 +580,7 @@ async function main(): Promise<void> {
+         }, () => {
+           // The stream reconnects; a transport failure does not change account state.
+         }, () => {
++          if (isIumBuild) return
+           void readWelcomeState().then(async (value) => {
+             if (!needsWelcome(value) || quitting) return
+             pendingWelcomeNotice = 'session-expired'
+@@ -573,7 +589,7 @@ async function main(): Promise<void> {
+             const state = await accountBackend.state()
+             if (welcomeWindow !== undefined && !welcomeWindow.isDestroyed()) welcomeWindow.webContents.send(WELCOME_IPC.state, state)
+           }).catch(() => undefined)
+-        }, (enabled) => { analyticsEnabled = enabled })
++        }, (enabled) => { analyticsEnabled = !isIumBuild && enabled })
+       },
+       stop: async () => {
+         analyticsEnabled = false
+@@ -676,6 +692,9 @@ async function main(): Promise<void> {
+   }
+ 
+   const manifest: unknown = JSON.parse(await readFile(join(app.getAppPath(), 'package.json'), 'utf8'))
++  if (typeof manifest !== 'object' || manifest === null) throw new Error('desktop policy: invalid application manifest')
++  // The downstream package owns its offline policy; runtime environment variables cannot restore the upstream updater.
++  const isIumBuild = 'name' in manifest && isIumPackageName(manifest.name)
+   const updateChannel = desktopUpdateChannel(manifest)
+   const updates = new DesktopUpdateCoordinator(
+     publishUpdate,
+@@ -732,7 +751,7 @@ async function main(): Promise<void> {
+       }
+       return true
+     },
+-    undefined, undefined, undefined,
++    undefined, isIumBuild ? () => false : undefined, undefined,
+     (success, reason) => { void track('desktop_upgrade_download_result', { is_success: success, ...reason === undefined ? {} : { error_reason: reason } }) },
+     updateChannel,
+   )
+@@ -829,11 +848,13 @@ async function main(): Promise<void> {
+   }
+   installFileActions(assertMainApplication, () => hostUrl)
+   ipcMain.on(PLATFORM_IPC.bootstrap, (event) => {
++    if (isIumBuild) { event.returnValue = null; return }
+     try { event.returnValue = platformView.bootstrap(event) }
+     catch { event.returnValue = null }
+   })
+   ipcMain.handle(PLATFORM_IPC.open, (event, page: unknown, bounds: unknown) => {
+     const owner = assertMainApplication(event)
++    if (isIumBuild) throw new Error('Rejected Platform command')
+     if (page !== 'usage' && page !== 'top-up') throw new Error('Invalid Platform page')
+     return platformView.open(owner, page, platformBounds(bounds))
+   })
+@@ -898,6 +919,7 @@ async function main(): Promise<void> {
+   let promptOperation: Promise<void> | undefined
+   let policyAuthenticationQueued = false
+   const openUpdatePrompt = (manual = false): Promise<void> => {
++    if (isIumBuild) return Promise.resolve()
+     if (authenticationOperation !== undefined) {
+       policyAuth?.focus(); updateDialog.focus()
+     }
+@@ -1017,6 +1039,7 @@ async function main(): Promise<void> {
+   }
+ 
+   const automaticCheck = (): void => {
++    if (isIumBuild) return
+     if (!quitting) void mandatoryPolicy?.check('foreground-or-resume').catch((error: unknown) => { console.error(error) })
+     if (!quitting) void updateSchedule.check().catch((error: unknown) => { console.error(error) })
+   }
+@@ -1030,7 +1053,7 @@ async function main(): Promise<void> {
+   const applicationIconPath = development ? join(app.getAppPath(), 'resources', 'icon-windows.png')
+     : join(process.resourcesPath, 'icon.png')
+   app.setAboutPanelOptions({
+-    applicationName: 'DeepSeek Harness',
++    applicationName: isIumBuild ? 'DSH Ium' : 'DeepSeek Harness',
+     applicationVersion: app.getVersion(),
+     // The release has no separate build number; omit Electron's bundle version.
+     version: '',
+@@ -1057,8 +1080,8 @@ async function main(): Promise<void> {
+         click: () => { void showAbout().catch((error: unknown) => { console.error(error) }) } }
+       : { label: currentDesktopLocale().messages.aboutMenu, role: 'about' },
+     { type: 'separator' },
+-    { label: currentDesktopLocale().messages.checkUpdatesMenu, click: () => { void openUpdatePrompt(true) } },
+-    ...process.platform === 'darwin' || process.platform === 'win32'
++    ...isIumBuild ? [] : [{ label: currentDesktopLocale().messages.checkUpdatesMenu, click: () => { void openUpdatePrompt(true) } }],
++    ...!isIumBuild && (process.platform === 'darwin' || process.platform === 'win32')
+       ? [{ label: currentDesktopLocale().messages.cliCommandMenu, click: () => { void commandManager.show() } }] : [],
+     { type: 'separator' },
+     ...development ? [
+@@ -1241,6 +1264,7 @@ async function main(): Promise<void> {
+   let openingWelcome: Promise<void> | undefined
+   const showWelcome = (): Promise<void> => {
+     if (quitting) return Promise.resolve()
++    if (isIumBuild) return enterWorkspace()
+     if (welcomeWindow !== undefined && !welcomeWindow.isDestroyed()) {
+       if (!welcomeWindow.isVisible()) void track('auth_page_view', {})
+       welcomeWindow.show()
+@@ -1302,6 +1326,7 @@ async function main(): Promise<void> {
+   }
+   const openInitialWindow = async (): Promise<void> => {
+     if (quitting || recovery.active) return
++    if (isIumBuild) { await enterWorkspace(); return }
+     const state = await readWelcomeState()
+     if (isQuitting() || backend.state.phase !== 'ready') return
+     locale = resolveDesktopStartupLocale(state.localePreference, systemLanguages)
+@@ -1332,11 +1357,13 @@ async function main(): Promise<void> {
+     window.focus()
+   }
+ 
+-  if (app.isPackaged || process.env.DSH_DESKTOP_DEV_APP === '1') app.setAsDefaultProtocolClient('dsh')
+-  app.on('open-url', (event, url) => {
+-    event.preventDefault()
+-    if (url === 'dsh://open' || url === 'dsh://open/') focusPrimaryWindow()
+-  })
++  if (!isIumBuild) {
++    if (app.isPackaged || process.env.DSH_DESKTOP_DEV_APP === '1') app.setAsDefaultProtocolClient('dsh')
++    app.on('open-url', (event, url) => {
++      event.preventDefault()
++      if (url === 'dsh://open' || url === 'dsh://open/') focusPrimaryWindow()
++    })
++  }
+ 
+   app.on('activate', (_event, hasVisibleWindows) => {
+     if (!hasVisibleWindows) focusPrimaryWindow()
+@@ -1393,9 +1420,8 @@ async function main(): Promise<void> {
+   })
+ 
+   mainWindow = createMainWindow()
+-  if (typeof manifest !== 'object' || manifest === null) throw new Error('desktop policy: invalid application manifest')
+-  const developmentPolicy = app.isPackaged ? undefined : process.env.DSH_DESKTOP_MANDATORY_UPDATE_CONFIG
+-  const policyInput: unknown = app.isPackaged
++  const developmentPolicy = isIumBuild || app.isPackaged ? undefined : process.env.DSH_DESKTOP_MANDATORY_UPDATE_CONFIG
++  const policyInput: unknown = isIumBuild ? undefined : app.isPackaged
+     ? ('dshMandatoryUpdatePolicy' in manifest ? manifest.dshMandatoryUpdatePolicy : undefined)
+     : developmentPolicy === undefined ? undefined : JSON.parse(developmentPolicy) as unknown
+   const policyConfig = resolveDesktopPolicyConfig(policyInput, !app.isPackaged)
+diff --git a/apps/desktop/tests/desktop-package-environment.spec.ts b/apps/desktop/tests/desktop-package-environment.spec.ts
+index a8d79a2c96f82358872c5b9e94e1d6dbe4e3d286..73f253c363f5927d935d8d08911990f994b76af9 100644
+--- a/apps/desktop/tests/desktop-package-environment.spec.ts
++++ b/apps/desktop/tests/desktop-package-environment.spec.ts
+@@ -4,6 +4,7 @@ import { join } from 'node:path'
+ import { describe, expect, it } from 'vitest'
+ import { loadDesktopPackageEnvironment, localMacOSPackageEnvironment, validateDesktopPackageEnvironment } from '../scripts/desktop-package-environment.mjs'
+ import { resolveWindowsPackageSettings } from '../scripts/windows-package-settings.mjs'
++import { resolveNpmRegistry } from '../scripts/desktop-release-environment.mjs'
+ 
+ const WINDOWS = { platform: 'win32', arch: 'x64' } as const
+ const MACOS = { platform: 'darwin', arch: 'arm64' } as const
+@@ -114,7 +115,7 @@ describe('Desktop local packaging configuration', () => {
+     const local = localMacOSPackageEnvironment(parent)
+     expect(local).toEqual({
+       PATH: parent.PATH, HTTPS_PROXY: parent.HTTPS_PROXY, DSH_DESKTOP_NPM_REGISTRY: parent.DSH_DESKTOP_NPM_REGISTRY,
+-      DSH_DESKTOP_APP_ID: 'com.deepseek.harness', DSH_DESKTOP_UNSIGNED: '1',
++      DSH_DESKTOP_APP_ID: 'io.github.lizy14.dshium', DSH_DESKTOP_UNSIGNED: '1',
+     })
+     expect(() => { validateDesktopPackageEnvironment(local, MACOS, { unsigned: true }) }).not.toThrow()
+     expect(parent.DSH_DESKTOP_UNSIGNED).toBe('0')
+@@ -256,6 +257,19 @@ describe('Desktop local packaging configuration', () => {
+     }).not.toThrow()
+   })
+ 
++  it('accepts unsigned Windows without update origins and ignores stale mandatory policy metadata', async () => {
++    await withDirectory(async (directory) => {
++      await writeFile(join(directory, '.env.windows'), 'DSH_DESKTOP_APP_ID=io.github.lizy14.dshium\n')
++      const selected = loadDesktopPackageEnvironment('win32', {}, directory, { unsigned: true })
++      expect(selected).toEqual({ DSH_DESKTOP_APP_ID: 'io.github.lizy14.dshium' })
++      expect(() => { validateDesktopPackageEnvironment(selected, WINDOWS, { unsigned: true }) }).not.toThrow()
++      expect(() => {
++        validateDesktopPackageEnvironment({ ...selected, DSH_DESKTOP_MANDATORY_UPDATE_CONFIG: 'not-json' }, WINDOWS, { unsigned: true })
++      }).not.toThrow()
++      expect(() => { validateDesktopPackageEnvironment(selected, WINDOWS) }).toThrow('DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN')
++    })
++  })
++
+   it('accepts unsigned macOS configuration without Apple or update policy settings while keeping release validation', () => {
+     const local = localMacOSPackageEnvironment({})
+     expect(() => { validateDesktopPackageEnvironment(local, MACOS, { unsigned: true }) }).not.toThrow()
+@@ -264,18 +278,73 @@ describe('Desktop local packaging configuration', () => {
+     expect(() => { validateDesktopPackageEnvironment(RELEASE, MACOS) }).toThrow('DSH_DESKTOP_MACOS_SIGNING_IDENTITY')
+   })
+ 
+-  it('accepts one local npm registry mirror and rejects other registry forms', () => {
+-    const release = { ...POLICY, DSH_DESKTOP_APP_ID: RELEASE.DSH_DESKTOP_APP_ID }
+-    expect(() => {
+-      validateDesktopPackageEnvironment({ ...release, DSH_DESKTOP_NPM_REGISTRY: 'https://registry.npmmirror.com/' }, WINDOWS, { unsigned: true })
+-    }).not.toThrow()
+-    for (const value of ['http://registry.example.com/', 'https://registry.example.com/path', 'https://user:secret@registry.example.com/', 'not-a-url']) {
++  it.each([undefined, '', ' \t '])('retains the public registry when the override is %j', (value) => {
++    expect(resolveNpmRegistry({ DSH_DESKTOP_NPM_REGISTRY: value })).toBe('https://registry.npmjs.org/')
++  })
++
++  it.each([
++    ['https://registry.example.com', 'https://registry.example.com'],
++    ['https://registry.example.com/', 'https://registry.example.com'],
++    [' https://REGISTRY.example.com:443/ ', 'https://registry.example.com'],
++    ['https://registry.example.com:8443/', 'https://registry.example.com:8443'],
++  ])('retains root-origin normalization for %s', (value, expected) => {
++    expect(resolveNpmRegistry({ DSH_DESKTOP_NPM_REGISTRY: value })).toBe(expected)
++    expect(new URL('some-package', expected).href).toBe(`${expected}/some-package`)
++  })
++
++  it.each([
++    ['https://registry.example.com/npm', 'https://registry.example.com/npm/'],
++    ['https://registry.example.com/npm/', 'https://registry.example.com/npm/'],
++    ['https://registry.example.com:8443/artifactory/api/npm/packages', 'https://registry.example.com:8443/artifactory/api/npm/packages/'],
++    [' https://registry.example.com/team%20packages/npm/ ', 'https://registry.example.com/team%20packages/npm/'],
++  ])('retains the registry prefix for relative metadata and tarball URLs from %s', (value, expected) => {
++    const environment = { DSH_DESKTOP_NPM_REGISTRY: value }
++    const registry = resolveNpmRegistry(environment)
++    expect(registry).toBe(expected)
++    expect(environment.DSH_DESKTOP_NPM_REGISTRY).toBe(value)
++    expect(new URL('@scope%2fpackage', registry).href).toBe(`${expected}@scope%2fpackage`)
++    expect(new URL('@scope/package/-/package-1.0.0.tgz', registry).href).toBe(`${expected}@scope/package/-/package-1.0.0.tgz`)
++    for (const target of [WINDOWS, MACOS]) {
+       expect(() => {
+-        validateDesktopPackageEnvironment({ ...release, DSH_DESKTOP_NPM_REGISTRY: value }, WINDOWS, { unsigned: true })
+-      }).toThrow(/DSH_DESKTOP_NPM_REGISTRY/u)
++        validateDesktopPackageEnvironment({ ...RELEASE, ...environment }, target, { unsigned: true })
++      }).not.toThrow()
+     }
+   })
+ 
++  it('retains a file-owned registry prefix through packaging environment selection and validation', async () => {
++    await withDirectory(async (directory) => {
++      await writeFile(join(directory, '.env.windows'), 'DSH_DESKTOP_APP_ID=com.example.desktop\nDSH_DESKTOP_NPM_REGISTRY=https://registry.example.com/npm/\n')
++      const parent = { DSH_DESKTOP_NPM_REGISTRY: 'https://stale.example.com/' }
++      const selected = loadDesktopPackageEnvironment('win32', parent, directory, { unsigned: true })
++      expect(selected.DSH_DESKTOP_NPM_REGISTRY).toBe('https://registry.example.com/npm/')
++      expect(resolveNpmRegistry(selected)).toBe('https://registry.example.com/npm/')
++      expect(() => { validateDesktopPackageEnvironment(selected, WINDOWS, { unsigned: true }) }).not.toThrow()
++      expect(parent.DSH_DESKTOP_NPM_REGISTRY).toBe('https://stale.example.com/')
++    })
++  })
++
++  it.each([
++    'http://registry.example.com/npm/',
++    'http://localhost:4873/npm/',
++    'ftp://registry.example.com/npm/',
++    'https://user:secret-sentinel@registry.example.com/npm/',
++    'https://user@registry.example.com/npm/',
++    'https://:secret-sentinel@registry.example.com/npm/',
++    'https://registry.example.com/npm/?token=secret-sentinel',
++    'https://registry.example.com/npm/#fragment',
++    'https://registry.example.com/npm/?',
++    'https://registry.example.com/npm/#',
++    '//registry.example.com/npm/',
++    'not-a-url',
++  ])('rejects unsafe registry base URL %j without exposing its value', (value) => {
++    const environment = { ...RELEASE, DSH_DESKTOP_NPM_REGISTRY: value }
++    expect(() => resolveNpmRegistry(environment)).toThrow(/DSH_DESKTOP_NPM_REGISTRY/u)
++    expect(() => resolveNpmRegistry(environment)).not.toThrow(/secret-sentinel/u)
++    expect(() => {
++      validateDesktopPackageEnvironment(environment, WINDOWS, { unsigned: true })
++    }).toThrow(/DSH_DESKTOP_NPM_REGISTRY/u)
++  })
++
+   it('rejects incomplete macOS identity and credentials and checks referenced files without contacting Apple', async () => {
+     expect(() => {
+       validateDesktopPackageEnvironment(RELEASE, MACOS)
+diff --git a/apps/desktop/tests/installer-packaging.spec.ts b/apps/desktop/tests/installer-packaging.spec.ts
+index 1e438dedf4ea74d2991fcbe30692507f33dae824..6b0d5877211dafaf73b0877e8755e8f17293d20c 100644
+--- a/apps/desktop/tests/installer-packaging.spec.ts
++++ b/apps/desktop/tests/installer-packaging.spec.ts
+@@ -51,10 +51,14 @@ describe('installer preparation preserves application dependencies', () => {
+         metadata: { value: metadata },
+       })
+       const appInfo = new AppInfo(metadataPackager, undefined)
+-      expect(appInfo.companyName).toBe('Hangzhou DeepSeek Artificial Intelligence Co., Ltd.')
+-      expect(appInfo.copyright).toBe(`Copyright © ${new Date().getFullYear()} DeepSeek Harness`)
++      expect(metadata).toMatchObject({ name: '@lizy14/dsh-desktop-ium', main: 'lib/ium-bootstrap.js', license: 'MIT',
++        contributors: [{ name: 'Hangzhou DeepSeek Artificial Intelligence Co., Ltd. (upstream)' }] })
++      expect(appInfo.companyName).toBe('lizy14 (unofficial downstream maintainer)')
++      expect(appInfo.copyright).toBe(`Copyright © ${new Date().getFullYear()} DSH Ium`)
++      expect(appInfo.updaterCacheDirName).toContain('lizy14')
++      expect(appInfo.updaterCacheDirName).not.toContain('deepseek-aidsh-desktop')
+       if (platform === 'win32') {
+-        expect(expandMacro(config.nsis.uninstallDisplayName, null, appInfo, {}, false)).toBe('DeepSeek Harness')
++        expect(expandMacro(config.nsis.uninstallDisplayName, null, appInfo, {}, false)).toBe('DSH Ium')
+         expect(config.nsis.installerLanguages).toEqual(readInstallerLocales().map(locale => locale.id))
+       }
+       const aboutIcon = config.extraResources.find(resource => resource.to === 'icon.png')
+@@ -89,17 +93,27 @@ describe('installer preparation preserves application dependencies', () => {
+     }
+   })
+ 
+-  it('names unsigned Windows artifacts so they cannot pass for release builds', async () => {
++  it('keeps unsigned Windows identity separate without updater or mandatory policy metadata', async () => {
+     const { createElectronBuilderConfig } = await import('../scripts/electron-builder-config.mjs')
+     const config = createElectronBuilderConfig({
+-      DSH_DESKTOP_APP_ID: 'com.example.installer',
+-      DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN: 'https://policy.example.com',
+-      DSH_DESKTOP_MANDATORY_UPDATE_CONFIG: JSON.stringify({ allowedAuthOrigins: ['https://login.example.com'] }),
++      DSH_DESKTOP_APP_ID: 'io.github.lizy14.dshium',
+       DSH_DESKTOP_TARGET_PLATFORM: 'win32',
+       DSH_DESKTOP_TARGET_ARCH: 'x64',
+       DSH_DESKTOP_UNSIGNED: '1',
+     }, 'win32', 'x64')
+     expect(config.artifactName).toBe('deepseek-harness-${version}-${os}-${arch}-unsigned.${ext}')
++    expect(config.appId).toBe('io.github.lizy14.dshium')
++    expect(config.productName).toBe('DSH Ium')
++    expect(config.protocols).toEqual([])
++    expect(config.publish).toBeNull()
++    expect(config.extraMetadata).not.toHaveProperty('dshMandatoryUpdatePolicy')
++    expect(config.files).toEqual(expect.arrayContaining(['lib/ium-bootstrap.js', 'lib/ium-node-preload.js']))
++    const stale = createElectronBuilderConfig({
++      DSH_DESKTOP_APP_ID: 'io.github.lizy14.dshium', DSH_DESKTOP_UNSIGNED: '1',
++      DSH_DESKTOP_MANDATORY_UPDATE_PROD_ORIGIN: 'not-an-origin', DSH_DESKTOP_MANDATORY_UPDATE_CONFIG: 'not-json',
++    }, 'win32', 'x64')
++    expect(stale.extraMetadata).not.toHaveProperty('dshMandatoryUpdatePolicy')
++    expect(stale.publish).toBeNull()
+   })
+ 
+   it('packages every preload entry point the shell loads', async () => {
+diff --git a/apps/desktop/tests/macos-signature.spec.ts b/apps/desktop/tests/macos-signature.spec.ts
+index 2e6a2bd48e3e28059dcbdcae506a48b2c1c206aa..b1d0ad56db18255f6284d5fe11dc0e582659e4ca 100644
+--- a/apps/desktop/tests/macos-signature.spec.ts
++++ b/apps/desktop/tests/macos-signature.spec.ts
+@@ -49,7 +49,7 @@ describe('desktop macOS release signature', () => {
+   it('loads release identifiers from the environment and requires code signing', async () => {
+     const { createElectronBuilderConfig } = await import('../electron-builder.config.mjs')
+     const config = createElectronBuilderConfig(RELEASE_ENVIRONMENT, 'darwin', 'arm64')
+-    expect(config.protocols).toEqual([{ name: 'DeepSeek Harness', schemes: ['dsh'] }])
++    expect(config.protocols).toEqual([])
+     expect(portablePath(config.directories.output)).toContain('/.desktop-build/targets/mac-arm64/artifacts')
+     expect(config.mac.extendInfo.NSMicrophoneUsageDescription).toContain('microphone')
+     expect(config.mac.extendInfo.CFBundleLocalizations).toEqual(SHIPPED_LOCALE_IDS.map(id => id === 'zh' ? 'zh_CN' : id))
+@@ -136,7 +136,7 @@ describe('desktop macOS release signature', () => {
+       DSH_DESKTOP_MANDATORY_UPDATE_CONFIG: JSON.stringify({ allowedAuthOrigins: ['https://login.example.com'] }),
+       DSH_DESKTOP_TARGET_PLATFORM: 'win32',
+     }, 'win32')).toThrow(/DSH_DESKTOP_WINDOWS_CER_FILE/u)
+-  })
++  }, 30_000)
+ 
+   it('isolates unsigned Windows artifacts and omits updater metadata without release credentials', async () => {
+     const { createElectronBuilderConfig } = await import('../electron-builder.config.mjs')
+diff --git a/apps/desktop/tests/main-startup.spec.ts b/apps/desktop/tests/main-startup.spec.ts
+index 3b1e63e00cf22f69e7849430771fc3fc7ddd4945..36c0bc2c7beacd4fd551011a4467729dcb4c3148 100644
+--- a/apps/desktop/tests/main-startup.spec.ts
++++ b/apps/desktop/tests/main-startup.spec.ts
+@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os'
+ import type { MenuItemConstructorOptions, MessageBoxOptions } from 'electron'
+ import { DESKTOP_IPC, type DesktopUpdateState } from '../src/ipc.ts'
+ import { MANDATORY_IPC } from '../src/mandatory-update-ipc.ts'
++import { PLATFORM_IPC } from '../src/platform-view.ts'
+ import { DesktopHostFatalError, DesktopHostUncleanExitError } from '../src/host-process.ts'
+ import { en, zh } from '../src/locale.ts'
+ import { DesktopUpdatePreparationError } from '../src/update-error.ts'
+@@ -56,6 +57,8 @@ const harness = await vi.hoisted(async () => {
+   let quitCompleted = deferred()
+   let policyBlocked = deferred()
+   let embeddedPolicy: unknown
++  let packageName = '@deepseek-ai/dsh-desktop'
++  let updaterEnabled: (() => boolean) | undefined
+   let closeWindowsOnQuit = false
+   let updateState: DesktopUpdateState = { phase: 'idle' }
+   let platformDisposeDeferred: ReturnType<typeof deferred> | undefined
+@@ -170,6 +173,7 @@ const harness = await vi.hoisted(async () => {
+       readonly packageManager?: { pnpm: string; nodeBin: string },
+       readonly onPlatformSession?: ConstructorParameters<typeof DesktopHostProcess>[8],
+       readonly onPluginOperation?: ConstructorParameters<typeof DesktopHostProcess>[9],
++      readonly networkPreload?: string,
+     ) { hosts.push(this) }
+   }
+   const app = Object.assign(new EventEmitter(), {
+@@ -240,6 +244,7 @@ const harness = await vi.hoisted(async () => {
+     dialog: { showOpenDialog: vi.fn(), showErrorBox: vi.fn(), showMessageBox: vi.fn() },
+     openExternal: vi.fn(async () => {}),
+     protocolHandle: vi.fn<(scheme: string, handler: (request: Request) => Response | Promise<Response>) => void>(),
++    registerSchemes: vi.fn(),
+     applyRelease: vi.fn(() => { preparing.resolve(); return prepared.promise }),
+     disableAllPlugins: vi.fn(async () => {
+       pluginsEnabled = false
+@@ -251,6 +256,10 @@ const harness = await vi.hoisted(async () => {
+     get policyBlocked() { return policyBlocked },
+     get embeddedPolicy() { return embeddedPolicy },
+     set embeddedPolicy(value: unknown) { embeddedPolicy = value },
++    get packageName() { return packageName },
++    set packageName(value: string) { packageName = value; app.name = value },
++    get updaterEnabled() { return updaterEnabled },
++    set updaterEnabled(value: (() => boolean) | undefined) { updaterEnabled = value },
+     nextNavigation() { navigated = deferred(); return navigated.promise },
+     nextHostStart() { hostStarted = deferred(); return hostStarted.promise },
+     deferPlatformDispose() { platformDisposeDeferred = deferred(); return platformDisposeDeferred },
+@@ -267,6 +276,7 @@ const harness = await vi.hoisted(async () => {
+       shellDialog.isOpen = false
+       powerMonitor.removeAllListeners()
+       app.isPackaged = true
++      app.name = 'Desktop test'
+       windowFailure = undefined
+       pluginsEnabled = false
+       closeWindowsOnQuit = false
+@@ -282,6 +292,8 @@ const harness = await vi.hoisted(async () => {
+       navigated = deferred(); dialogShown = deferred(); quitCompleted = deferred()
+       policyBlocked = deferred()
+       embeddedPolicy = undefined
++      packageName = '@deepseek-ai/dsh-desktop'
++      updaterEnabled = undefined
+       fileDrag.install.mockReset()
+       fileDrag.dispose.mockReset().mockResolvedValue(undefined)
+       platformDisposeDeferred = undefined
+@@ -320,7 +332,7 @@ vi.mock('electron', () => ({
+     on: vi.fn(),
+     setPermissionCheckHandler: vi.fn(), setPermissionRequestHandler: vi.fn(), webRequest: { onBeforeSendHeaders: harness.socketHeaders },
+   } },
+-  protocol: { registerSchemesAsPrivileged: vi.fn(), handle: harness.protocolHandle },
++  protocol: { registerSchemesAsPrivileged: harness.registerSchemes, handle: harness.protocolHandle },
+   powerMonitor: harness.powerMonitor,
+   Tray: harness.FakeTray,
+   nativeImage: { createFromPath: (path: string) => ({ path }) },
+@@ -334,7 +346,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
+   const original = await importOriginal<typeof import('node:fs/promises')>()
+   return { ...original, readFile: vi.fn((path: Parameters<typeof original.readFile>[0], encoding?: 'utf8') => {
+     if (path === join('desktop-test-app', 'package.json')) {
+-      return Promise.resolve(JSON.stringify({ dshDesktopAppId: 'com.deepseek.dsh', dshMandatoryUpdatePolicy: harness.embeddedPolicy }))
++      return Promise.resolve(JSON.stringify({ name: harness.packageName, dshDesktopAppId: 'com.deepseek.dsh', dshMandatoryUpdatePolicy: harness.embeddedPolicy }))
+     }
+     return encoding === undefined ? original.readFile(path) : original.readFile(path, encoding)
+   }) }
+@@ -367,9 +379,11 @@ vi.mock('../src/update-dialog.ts', () => ({ DesktopUpdateDialog: class {
+   dispose() {}
+ } }))
+ vi.mock('../src/update-coordinator.ts', () => ({ DesktopUpdateCoordinator: class {
+-  constructor(publish: (state: DesktopUpdateState) => DesktopUpdateState, beforeRestart: () => Promise<boolean>) {
++  constructor(publish: (state: DesktopUpdateState) => DesktopUpdateState, beforeRestart: () => Promise<boolean>,
++    _updater?: unknown, enabled?: () => boolean) {
+     harness.prepareUpdate = beforeRestart
+     harness.publishUpdate = publish
++    harness.updaterEnabled = enabled
+   }
+   get state() { return harness.updateState }
+   readonly check = harness.updateCheck
+@@ -432,6 +446,7 @@ beforeEach(() => {
+   testAuth.login.mockResolvedValue('cancelled')
+   vi.useFakeTimers()
+   harness.reset()
++  harness.openExternal.mockReset().mockResolvedValue(undefined)
+   const userData = mkdtempSync(join(tmpdir(), 'dsh-main-user-data-'))
+   onTestFinished(() => { rmSync(userData, { recursive: true, force: true }) })
+   harness.app.getPath.mockImplementation(name => name === 'userData' ? userData : join(userData, `desktop-test-${name}`))
+@@ -472,9 +487,82 @@ afterEach(async () => {
+ })
+ 
+ describe('desktop main startup', () => {
++  it.each([true, false])('keeps Ium startup, focus, resume and manual update requests offline (packaged=%s)', async (packaged) => {
++    harness.packageName = '@lizy14/dsh-desktop-ium'
++    harness.app.isPackaged = packaged
++    harness.embeddedPolicy = { origin: 'https://policy.example.invalid', authentication: 'anonymous' }
++    vi.stubEnv('DSH_DESKTOP_MANDATORY_UPDATE_CONFIG', 'not-json')
++    const network = vi.fn<typeof fetch>().mockRejectedValue(new Error('unexpected network in offline startup test'))
++    vi.stubGlobal('fetch', network)
++    const host = await readyForUpdate()
++    expect(host.networkPreload).toBe(new URL('../src/ium-node-preload.js', import.meta.url).href)
++    expect(harness.updaterEnabled?.()).toBe(false)
++    expect(harness.registerSchemes).not.toHaveBeenCalled()
++    harness.windows[0]!.emit('focus')
++    harness.powerMonitor.emit('resume')
++    await invoke(DESKTOP_IPC.updatesOpen, 'app')
++    await vi.advanceTimersByTimeAsync(60 * 60 * 1000)
++    expect(harness.updateCheck).not.toHaveBeenCalled()
++    expect(harness.updateDownload).not.toHaveBeenCalled()
++    expect(network).not.toHaveBeenCalled()
++    expect(harness.app.setAsDefaultProtocolClient).not.toHaveBeenCalled()
++    expect(harness.app.listenerCount('open-url')).toBe(0)
++    const items = applicationMenuItems()
++    expect(items.some(item => item.label === en.checkUpdatesMenu || item.label === en.cliCommandMenu)).toBe(false)
++    expect(harness.app.setAboutPanelOptions).toHaveBeenCalledWith(expect.objectContaining({ applicationName: 'DSH Ium' }))
++  })
++
++  it('opens a fresh Ium workspace without DeepSeek onboarding and rejects native Platform pages', async () => {
++    harness.packageName = '@lizy14/dsh-desktop-ium'
++    await import('../src/main.ts')
++    await harness.preparing.promise
++    harness.prepared.resolve()
++    await harness.hostStarted.promise
++    const host = harness.hosts[0]!
++    host.fetch.mockResolvedValue(Response.json({ hasApiKey: false, writable: true, localePreference: null }))
++    host.ready.resolve()
++    await harness.navigated.promise
++    expect(harness.windows).toHaveLength(1)
++    const window = harness.windows[0]!
++    expect(window.urls).toEqual(['dsh-app://app/'])
++    const owned = { sender: window.webContents, senderFrame: window.webContents.mainFrame }
++    for (const page of ['usage', 'top-up']) {
++      expect(() => harness.handlers.get(PLATFORM_IPC.open)!(owned, page, { x: 0, y: 0, width: 800, height: 600 }))
++        .toThrow('Rejected Platform command')
++    }
++    harness.publishAccount({
++      status: 'signed-out', links: { usageUrl: 'https://platform.example.invalid/usage', topUpUrl: 'https://platform.example.invalid/top_up' },
++      attempt: { id: 'ium-unused-attempt' as NonNullable<AccountView['attempt']>['id'], phase: 'waiting-browser',
++        authorizeUrl: 'https://platform.example.invalid/dsh/authorize' },
++    })
++    harness.analyticsEnabled = true
++    expect(harness.openExternal).not.toHaveBeenCalled()
++    expect(harness.analytics).not.toHaveBeenCalled()
++    expect(fileDrag.install).toHaveBeenCalledOnce()
++  })
++
++  it('contains external-link policy denials without logging private URLs', async () => {
++    harness.packageName = '@lizy14/dsh-desktop-ium'
++    await readyForUpdate()
++    harness.openExternal.mockRejectedValue(new Error('private-query-sentinel'))
++    const window = harness.windows[0]!
++    const open = window.webContents.setWindowOpenHandler.mock.calls[0]?.[0]
++    if (typeof open !== 'function') throw new Error('Missing external-window handler')
++    expect(open({ url: 'https://links.example.invalid/?value=private-query-sentinel' })).toEqual({ action: 'deny' })
++    const event = { preventDefault: vi.fn() }
++    window.webContents.emit('will-navigate', event, 'https://links.example.invalid/?value=private-query-sentinel')
++    await vi.advanceTimersByTimeAsync(0)
++    expect(event.preventDefault).toHaveBeenCalledOnce()
++    expect(harness.openExternal).toHaveBeenCalledTimes(2)
++    expect(console.warn).toHaveBeenCalledWith('desktop: external link could not be opened')
++    expect(JSON.stringify(vi.mocked(console.warn).mock.calls)).not.toContain('private-query-sentinel')
++  })
++
+   it.each([true, false])('selects the package manager before Host startup (packaged=%s)', async (packaged) => {
+     harness.app.isPackaged = packaged
+     await readyForUpdate()
++    expect(harness.registerSchemes).toHaveBeenCalledOnce()
++    expect(harness.registerSchemes).toHaveBeenCalledWith([expect.objectContaining({ scheme: 'dsh-app' })])
+     const host = harness.hosts[0]!
+     expect(host.node).toBe(process.execPath)
+     expect(host.primaryRuntime).toBe(packaged
+diff --git a/apps/desktop/tests/package-macos.spec.ts b/apps/desktop/tests/package-macos.spec.ts
+index e8fb5dcf34a40053200744c7271b0076fc8cd3e8..4b45593a9fc2d774e99157b8cbbf7819c3c2066a 100644
+--- a/apps/desktop/tests/package-macos.spec.ts
++++ b/apps/desktop/tests/package-macos.spec.ts
+@@ -29,7 +29,7 @@ function barrier() {
+ async function fixture(arch: 'arm64' | 'x64' = 'arm64') {
+   const root = await mkdtemp(join(tmpdir(), 'desktop-parallel-notarization-'))
+   const artifactsRoot = join(root, 'artifacts')
+-  const appPath = join(artifactsRoot, arch === 'arm64' ? 'mac-arm64' : 'mac', 'DeepSeek Harness.app')
++  const appPath = join(artifactsRoot, arch === 'arm64' ? 'mac-arm64' : 'mac', 'DSH Ium.app')
+   await mkdir(join(appPath, 'Contents', 'Resources'), { recursive: true })
+   await writeFile(join(appPath, 'payload'), 'signed content')
+   await writeMacOSAppUpdateConfig(join(appPath, 'Contents', 'Resources'), {
+@@ -196,7 +196,7 @@ describe('parallel macOS artifacts', () => {
+   it('passes the actual App and isolated output directory to each single-target builder', () => {
+     const target = resolveDesktopPackageTarget('mac-arm64', 'darwin', 'arm64')
+     for (const format of ['zip', 'dmg'] as const) {
+-      const appPath = join('private build', format, 'DeepSeek Harness.app')
++      const appPath = join('private build', format, 'DSH Ium.app')
+       const output = join(dirname(appPath), 'artifacts')
+       expect(desktopElectronBuilderArguments(target, false, { format, appPath, output })).toEqual([
+         'exec', 'electron-builder', '--config', 'electron-builder.config.mjs',
+diff --git a/package.json b/package.json
+index c4f130943ddfee2d8d8040c6dd679f5b0e12312a..472fd8447f8e0d9d20b1bfb9c3f1abe0beb2e5d9 100644
+--- a/package.json
++++ b/package.json
+@@ -24,31 +24,31 @@
+     "build:bench": "npm run build:native-system && npm run build:lib && tsdown --config-loader native --config benchmarks/tsdown.config.ts",
+     "build:official": "tsx scripts/build.ts --profile official",
+     "build:lib": "pnpm run build:lib:host && pnpm run build:lib:client",
+-    "build:lib:host": "tsx scripts/compile-referenced-projects.ts host-libraries && node --max-old-space-size=8192 ./node_modules/typescript/bin/tsc -p tsconfig.host.json && pnpm --filter @deepseek-ai/dsh-desktop run bundle",
++    "build:lib:host": "tsx scripts/compile-referenced-projects.ts host-libraries && node --max-old-space-size=8192 ./node_modules/typescript/bin/tsc -p tsconfig.host.json && pnpm --filter @lizy14/dsh-desktop-ium run bundle",
+     "build:lib:client": "tsc -b tsconfig.client.json && tsdown --config-loader native --env.DSH_BUILD_FACE client",
+     "build:web": "pnpm --filter @deepseek-ai/dsh-web-frontend run build",
+-    "build:desktop": "pnpm --filter @deepseek-ai/dsh-desktop run build",
+-    "dev:desktop": "pnpm --filter @deepseek-ai/dsh-desktop run dev",
+-    "start:desktop": "pnpm --filter @deepseek-ai/dsh-desktop run start",
+-    "prepare:desktop": "pnpm --filter @deepseek-ai/dsh-desktop run prepare:package",
+-    "package:desktop": "pnpm --filter @deepseek-ai/dsh-desktop run package",
+-    "package:desktop:dir": "pnpm --filter @deepseek-ai/dsh-desktop run package:dir",
+-    "package:desktop:mac:arm64": "pnpm --filter @deepseek-ai/dsh-desktop run package:mac:arm64",
+-    "package:desktop:mac:arm64:unsigned": "pnpm --filter @deepseek-ai/dsh-desktop run package:mac:arm64:unsigned",
+-    "package:desktop:mac:arm64:dir": "pnpm --filter @deepseek-ai/dsh-desktop run package:mac:arm64:dir",
+-    "package:desktop:mac:x64": "pnpm --filter @deepseek-ai/dsh-desktop run package:mac:x64",
+-    "package:desktop:mac:x64:unsigned": "pnpm --filter @deepseek-ai/dsh-desktop run package:mac:x64:unsigned",
+-    "package:desktop:mac:x64:dir": "pnpm --filter @deepseek-ai/dsh-desktop run package:mac:x64:dir",
+-    "package:desktop:win:x64": "pnpm --filter @deepseek-ai/dsh-desktop run package:win:x64",
+-    "package:desktop:win:x64:unsigned": "pnpm --filter @deepseek-ai/dsh-desktop run package:win:x64:unsigned",
+-    "package:desktop:win:x64:dir": "pnpm --filter @deepseek-ai/dsh-desktop run package:win:x64:dir",
+-    "upload:mac:arm64": "pnpm --filter @deepseek-ai/dsh-desktop run upload:mac:arm64",
+-    "upload:mac:x64": "pnpm --filter @deepseek-ai/dsh-desktop run upload:mac:x64",
+-    "upload:win:x64": "pnpm --filter @deepseek-ai/dsh-desktop run upload:win:x64",
+-    "upload:latest:mac:arm64": "pnpm --filter @deepseek-ai/dsh-desktop run upload:latest:mac:arm64",
+-    "upload:latest:mac:x64": "pnpm --filter @deepseek-ai/dsh-desktop run upload:latest:mac:x64",
+-    "upload:latest:win:x64": "pnpm --filter @deepseek-ai/dsh-desktop run upload:latest:win:x64",
+-    "purge:latest": "pnpm --filter @deepseek-ai/dsh-desktop run purge:latest",
++    "build:desktop": "pnpm --filter @lizy14/dsh-desktop-ium run build",
++    "dev:desktop": "pnpm --filter @lizy14/dsh-desktop-ium run dev",
++    "start:desktop": "pnpm --filter @lizy14/dsh-desktop-ium run start",
++    "prepare:desktop": "pnpm --filter @lizy14/dsh-desktop-ium run prepare:package",
++    "package:desktop": "pnpm --filter @lizy14/dsh-desktop-ium run package",
++    "package:desktop:dir": "pnpm --filter @lizy14/dsh-desktop-ium run package:dir",
++    "package:desktop:mac:arm64": "pnpm --filter @lizy14/dsh-desktop-ium run package:mac:arm64",
++    "package:desktop:mac:arm64:unsigned": "pnpm --filter @lizy14/dsh-desktop-ium run package:mac:arm64:unsigned",
++    "package:desktop:mac:arm64:dir": "pnpm --filter @lizy14/dsh-desktop-ium run package:mac:arm64:dir",
++    "package:desktop:mac:x64": "pnpm --filter @lizy14/dsh-desktop-ium run package:mac:x64",
++    "package:desktop:mac:x64:unsigned": "pnpm --filter @lizy14/dsh-desktop-ium run package:mac:x64:unsigned",
++    "package:desktop:mac:x64:dir": "pnpm --filter @lizy14/dsh-desktop-ium run package:mac:x64:dir",
++    "package:desktop:win:x64": "pnpm --filter @lizy14/dsh-desktop-ium run package:win:x64",
++    "package:desktop:win:x64:unsigned": "pnpm --filter @lizy14/dsh-desktop-ium run package:win:x64:unsigned",
++    "package:desktop:win:x64:dir": "pnpm --filter @lizy14/dsh-desktop-ium run package:win:x64:dir",
++    "upload:mac:arm64": "pnpm --filter @lizy14/dsh-desktop-ium run upload:mac:arm64",
++    "upload:mac:x64": "pnpm --filter @lizy14/dsh-desktop-ium run upload:mac:x64",
++    "upload:win:x64": "pnpm --filter @lizy14/dsh-desktop-ium run upload:win:x64",
++    "upload:latest:mac:arm64": "pnpm --filter @lizy14/dsh-desktop-ium run upload:latest:mac:arm64",
++    "upload:latest:mac:x64": "pnpm --filter @lizy14/dsh-desktop-ium run upload:latest:mac:x64",
++    "upload:latest:win:x64": "pnpm --filter @lizy14/dsh-desktop-ium run upload:latest:win:x64",
++    "purge:latest": "pnpm --filter @lizy14/dsh-desktop-ium run purge:latest",
+     "clean": "tsx scripts/clean.ts",
+     "change-scope": "tsx scripts/change-scope.ts",
+     "typecheck": "tsx scripts/build.ts --scope typecheck",
+diff --git a/scripts/ci-workflow.spec.ts b/scripts/ci-workflow.spec.ts
+index 26d13714c173aaea7ef89bcc2192cd8edf0e9e96..cdf905caff590054de2be1697400e2f85c5f597f 100644
+--- a/scripts/ci-workflow.spec.ts
++++ b/scripts/ci-workflow.spec.ts
+@@ -148,7 +148,7 @@ describe('CI workflow', () => {
+     const hostSteps = scripts.scripts['build:lib:host']!.split(' && ')
+     expect(hostSteps[0]).toBe('tsx scripts/compile-referenced-projects.ts host-libraries')
+     expect(hostSteps).toContain('node --max-old-space-size=8192 ./node_modules/typescript/bin/tsc -p tsconfig.host.json')
+-    expect(hostSteps.at(-1)).toBe('pnpm --filter @deepseek-ai/dsh-desktop run bundle')
++    expect(hostSteps.at(-1)).toBe('pnpm --filter @lizy14/dsh-desktop-ium run bundle')
+     expect(scripts.scripts['build:lib:client']).toContain('tsc -b tsconfig.client.json')
+     expect(scripts.scripts.typecheck).toBe('tsx scripts/build.ts --scope typecheck')
+   })
+diff --git a/scripts/compile-referenced-projects.spec.ts b/scripts/compile-referenced-projects.spec.ts
+index b1f74ea2fd416192fe0113f08b7bf0d814e889a2..e17e056cd66c01950f4e7e8d764166f81a886f7d 100644
+--- a/scripts/compile-referenced-projects.spec.ts
++++ b/scripts/compile-referenced-projects.spec.ts
+@@ -75,7 +75,8 @@ function recordedCommands(root: string, failHostBundle = false): () => { args: s
+     .map(line => JSON.parse(line) as { args: string[]; title: string })
+ }
+ 
+-describe('internal artifact build order', () => {
++// These fixtures launch real compiler processes while other specs run concurrently.
++describe('internal artifact build order', { timeout: 60_000 }, () => {
+   it('resolves pnpm for a direct CLI without npm_execpath and preserves its environment', () => {
+     const { root } = fixture()
+     const marker = join(root, 'direct-cli-title.txt')
+@@ -104,7 +105,7 @@ describe('internal artifact build order', () => {
+     const expected = [
+       ['exec', 'tsdown', '--config-loader', 'native', '--env.DSH_BUILD_FACE', 'host'],
+       ...hostOnly ? [] : [
+-        ['--filter', '@deepseek-ai/dsh-desktop', 'run', 'bundle'],
++        ['--filter', '@lizy14/dsh-desktop-ium', 'run', 'bundle'],
+         ['exec', 'tsdown', '--config-loader', 'native', '--env.DSH_BUILD_FACE', 'client'],
+       ],
+     ]
+@@ -154,7 +155,7 @@ describe('internal artifact build order', () => {
+     expect(commands()).toEqual([
+       ['run', 'build:native-system'],
+       ['exec', 'tsdown', '--config-loader', 'native', '--env.DSH_BUILD_FACE', 'host'],
+-      ['--filter', '@deepseek-ai/dsh-desktop', 'run', 'bundle'],
++      ['--filter', '@lizy14/dsh-desktop-ium', 'run', 'bundle'],
+       ['exec', 'tsdown', '--config-loader', 'native', '--env.DSH_BUILD_FACE', 'client'],
+       ['exec', 'tsdown', '--config-loader', 'native', '--config', 'benchmarks/tsdown.config.ts'],
+       ['run', 'build:web'],
+diff --git a/scripts/compile-referenced-projects.ts b/scripts/compile-referenced-projects.ts
+index 492e277a6abc2a34447eb61eeeb069a1cae56624..f695f97af9357bf638fe198840ec8abfbae42df9 100644
+--- a/scripts/compile-referenced-projects.ts
++++ b/scripts/compile-referenced-projects.ts
+@@ -183,7 +183,7 @@ export function libraryBuildSteps(root: string, faces: 'host' | 'all', mode: Com
+   if (faces === 'host') return host
+   return [
+     ...host,
+-    pnpmStep('desktop-bundle', 'Desktop bundle', ['--filter', '@deepseek-ai/dsh-desktop', 'run', 'bundle'], ['host-bundle']),
++    pnpmStep('desktop-bundle', 'Desktop bundle', ['--filter', '@lizy14/dsh-desktop-ium', 'run', 'bundle'], ['host-bundle']),
+     compilerStep(root, 'client', mode, ['desktop-bundle']),
+     pnpmStep('client-bundle', 'Client bundle', ['exec', 'tsdown', '--config-loader', 'native', '--env.DSH_BUILD_FACE', 'client'], ['client-src']),
+   ]
+diff --git a/scripts/run-gates.spec.ts b/scripts/run-gates.spec.ts
+index 69903a0d1c75434a76857f011c3fc0be802f0247..45eafd998a892839a2a34b3335e06a0b41c140dc 100644
+--- a/scripts/run-gates.spec.ts
++++ b/scripts/run-gates.spec.ts
+@@ -615,7 +615,7 @@ describe('gate graph validation', () => {
+       const install = gates.find(gate => gate.id === 'electron-install')
+       expect(install).toMatchObject({
+         command: process.execPath,
+-        args: ['/private/pnpm.cjs', '--filter', '@deepseek-ai/dsh-desktop', 'exec', 'install-electron'],
++        args: ['/private/pnpm.cjs', '--filter', '@lizy14/dsh-desktop-ium', 'exec', 'install-electron'],
+         env: { ELECTRON_GET_USE_PROXY: '1' },
+       })
+       expect(gates.find(gate => gate.id === 'built-bin-smoke')?.needs).toContain('electron-install')
+diff --git a/scripts/run-gates.ts b/scripts/run-gates.ts
+index 7df19acc3e3b6081db4ce80a24473101d49c035f..05f37a8afd22290003bbfbe815e4672402170403 100644
+--- a/scripts/run-gates.ts
++++ b/scripts/run-gates.ts
+@@ -631,8 +631,8 @@ function electronInstallGate(): Gate {
+   return {
+     id: 'electron-install',
+     label: 'Electron binary',
+-    displayCommand: 'pnpm --filter @deepseek-ai/dsh-desktop exec install-electron',
+-    ...pnpmInvocation(['--filter', '@deepseek-ai/dsh-desktop', 'exec', 'install-electron']),
++    displayCommand: 'pnpm --filter @lizy14/dsh-desktop-ium exec install-electron',
++    ...pnpmInvocation(['--filter', '@lizy14/dsh-desktop-ium', 'exec', 'install-electron']),
+     env: { ELECTRON_GET_USE_PROXY: '1' },
+   }
+ }

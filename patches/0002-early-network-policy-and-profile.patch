@@ -1,0 +1,157 @@
+diff --git a/apps/desktop-host/package.json b/apps/desktop-host/package.json
+index dec1b3f5fe26c5ac889a9b1ff3217912c9025699..396d0ba669982065931b3088496a4a4a8af209a0 100644
+--- a/apps/desktop-host/package.json
++++ b/apps/desktop-host/package.json
+@@ -8,7 +8,8 @@
+   "main": "lib/index.js",
+   "files": [
+     "lib/index.js",
+-    "lib/cli.js"
++    "lib/cli.js",
++    "ium-work.cordis.yml"
+   ],
+   "dependencies": {
+     "koffi": "3.1.1",
+diff --git a/apps/desktop-host/src/index.ts b/apps/desktop-host/src/index.ts
+index 31bbbffe151c7311b4c593187084971ac7e93113..41ae3049d57755099c19341df40a23413c4eb39b 100644
+--- a/apps/desktop-host/src/index.ts
++++ b/apps/desktop-host/src/index.ts
+@@ -1,6 +1,7 @@
+ /** Launch the Desktop profile through the Web application and report its URL to Electron. */
+ 
+ import { delimiter, join } from 'node:path'
++import { fileURLToPath } from 'node:url'
+ import { randomUUID } from 'node:crypto'
+ import type { PluginOperationRunId } from '@deepseek-ai/dsh-plugin-manager/diagnostic'
+ import { formatFatalDiagnostic } from './fatal-diagnostic.ts'
+@@ -32,14 +33,18 @@ async function main(): Promise<void> {
+     environment: loadLayeredEnv('dsh'),
+     profile: 'desktop',
+     resolvedProfile: { profile, installAnchor },
+-    patchFiles: [],
++    patchFiles: [fileURLToPath(new URL('../ium-work.cordis.yml', import.meta.url))],
+     args: ['--no-open', '--host', '127.0.0.1', '--port', '0'],
+     ...(process.argv[5] === undefined ? {} : {
+       packageManager: {
+         command: process.execPath,
+-        args: ['--expose-internals', process.argv[5]],
++        args: [
++          ...(process.env.IUM_NETWORK_PRELOAD === undefined ? [] : ['--import', process.env.IUM_NETWORK_PRELOAD]),
++          '--expose-internals', process.argv[5],
++        ],
+         env: {
+           ELECTRON_RUN_AS_NODE: '1',
++          DSH_HOME: resolveDshHome(),
+           DSH_DESKTOP_NODE_EXECUTABLE: process.execPath,
+           PATH: `${process.argv[6] ?? ''}${delimiter}${process.env.PATH ?? ''}`,
+         },
+diff --git a/apps/desktop/src/host-process.ts b/apps/desktop/src/host-process.ts
+index 338f93bda45cf06c6d0924d719595225b8f64841..e9480d669e2cc703967ff54e235f9e2ad103dc0a 100644
+--- a/apps/desktop/src/host-process.ts
++++ b/apps/desktop/src/host-process.ts
+@@ -187,6 +187,7 @@ export class DesktopHostProcess {
+    * @param packageManager - Bundled pnpm entry and Node launcher directory, scoped to package operations.
+    * @param onPlatformSession - Private credential updates for embedded Platform views.
+    * @param onPluginOperation - Optional diagnostic sink; malformed records are ignored without failing the Host.
++   * @param networkPreload - Optional trusted file URL loaded before Host dependencies; Ium supplies its process policy.
+    */
+   constructor(
+     private readonly node: string,
+@@ -200,6 +201,7 @@ export class DesktopHostProcess {
+ 
+     private readonly onPlatformSession?: (session: PlatformSession | null) => void,
+     private readonly onPluginOperation?: (record: PluginOperationRecord) => void,
++    private readonly networkPreload?: string,
+   ) {}
+ 
+   /**
+@@ -210,6 +212,7 @@ export class DesktopHostProcess {
+     if (this.child !== undefined) return this.readyPromise
+     const entry = join(this.runtimeDir, 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'index.js')
+     const child = spawn(this.node, [
++      ...(this.networkPreload === undefined ? [] : ['--import', this.networkPreload]),
+       '--expose-internals',
+       ...(this.inspectPort === undefined ? [] : [`--inspect=127.0.0.1:${String(this.inspectPort)}`]),
+       entry,
+@@ -219,7 +222,10 @@ export class DesktopHostProcess {
+       ...this.packageManager === undefined ? [] : [this.packageManager.pnpm, this.packageManager.nodeBin],
+     ], {
+       cwd: this.projectDir,
+-      env: desktopNodeEnvironment(this.node, undefined, this.environment),
++      env: desktopNodeEnvironment(this.node, undefined, {
++        ...this.environment,
++        ...(this.networkPreload === undefined ? {} : { IUM_NETWORK_PRELOAD: this.networkPreload }),
++      }),
+       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+     })
+     this.child = child
+diff --git a/apps/desktop/tests/host-process.spec.ts b/apps/desktop/tests/host-process.spec.ts
+index 9a72fd2925eb5afdeb73c59ee873623c8c744e20..d41b67771f66ea1ca158f0e8263cb8b890264909 100644
+--- a/apps/desktop/tests/host-process.spec.ts
++++ b/apps/desktop/tests/host-process.spec.ts
+@@ -1,6 +1,7 @@
+ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+ import { tmpdir } from 'node:os'
+ import { join } from 'node:path'
++import { pathToFileURL } from 'node:url'
+ import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
+ import { DesktopHostFatalError, DesktopHostProcess, DesktopHostUncleanExitError, QUIT_INSPECTION_DEADLINE_MS } from '../src/host-process.ts'
+ import { OperationJournal } from '../src/operation-journal.ts'
+@@ -91,6 +92,21 @@ afterEach(async () => {
+ })
+ 
+ describe('desktop host process', () => {
++  it('loads the Ium policy before Host dependencies without shifting private argv', async () => {
++    const body = HTTP_HOST.replace('runtime: process.argv[2]', 'networkPreload: process.env.IUM_NETWORK_PRELOAD, runtime: process.argv[2]')
++    const runtime = projectWithHost(`import './preload-required.js'\n${body}`)
++    const dependency = join(runtime, 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'preload-required.js')
++    writeFileSync(dependency, `if (process.env.IUM_POLICY_ORDER !== 'ready') throw new Error('policy loaded after Host dependency')\n`)
++    const preload = join(runtime, 'policy-preload.mjs')
++    writeFileSync(preload, `process.env.IUM_POLICY_ORDER = 'ready'\n`)
++    const environment = { ...process.env, IUM_POLICY_ORDER: '', IUM_NETWORK_PRELOAD: 'untrusted-input' }
++    const host = new DesktopHostProcess(process.execPath, runtime, runtime, undefined, environment,
++      undefined, undefined, undefined, undefined, undefined, pathToFileURL(preload).href)
++    hosts.push(host)
++    const { url } = await host.start()
++    expect(await (await fetch(url)).json()).toMatchObject({ runtime, profile: runtime, internals: true, networkPreload: pathToFileURL(preload).href })
++  })
++
+   it('retains the announced run identity when startup fails before readiness', async () => {
+     const runtime = projectWithHost(`
+ process.send({ type: 'starting', runId: 'c254ab28-97c9-4382-95e6-2db9c66f98c8' })
+diff --git a/apps/desktop/tsdown.config.ts b/apps/desktop/tsdown.config.ts
+index 40ed1a0316ab455e452318786cb436186f267288..389ebf242272bd4958120871157dc00799b03edb 100644
+--- a/apps/desktop/tsdown.config.ts
++++ b/apps/desktop/tsdown.config.ts
+@@ -33,6 +33,17 @@ if (clientVersion === undefined) throw new Error('desktop build: the client envi
+ const clientVersionDefine = { 'process.env.DSH_CLIENT_VERSION': JSON.stringify(clientVersion) }
+ 
+ export default defineConfig([
++  {
++    entry: {
++      'ium-bootstrap': 'src/ium-bootstrap.mjs',
++      'ium-node-preload': 'src/ium-node-preload.mjs',
++      'ium-network-policy': 'src/ium-network-policy.mjs',
++    },
++    plugins: [packagedImportsPlugin({ packages: new Set(['electron', 'undici']), nodeBuiltins: true })],
++    outDir: 'lib', format: ['esm'], platform: 'node', target: 'es2024',
++    fixedExtension: false, dts: false, clean: false, codeSplitting: false,
++    deps: { neverBundle: ['electron', 'undici'] },
++  },
+   {
+     entry: ['lib/types/operation-report-worker.js'],
+     plugins: [packagedImportsPlugin({ packages: new Set(), nodeBuiltins: true })],
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index d6ef3e506e9d477291875dd2739f0c863d4f1a38..df8a03802ae657b4ac4180150c7f686f7e65c0e6 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -727,6 +727,9 @@ importers:
+       semver:
+         specifier: ^7.8.5
+         version: 7.8.5
++      undici:
++        specifier: 7.29.1
++        version: 7.29.1
+       ws:
+         specifier: ^8.21.3
+         version: 8.21.3

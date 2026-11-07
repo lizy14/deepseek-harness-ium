@@ -1,0 +1,20 @@
+{
+  "name": "deepseek-harness-ium-build",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=24.9.0" },
+  "dependencies": { "undici": "7.29.1" },
+  "scripts": {
+    "test": "node --test --test-isolation=none --test-concurrency=1 tests/*.test.mjs",
+    "test:upstream": "node scripts/test-upstream.mjs",
+    "upstream": "node scripts/upstream.mjs",
+    "apply": "node scripts/apply.mjs",
+    "verify": "node scripts/verify.mjs",
+    "compile": "node scripts/compile.mjs",
+    "toolchain": "node scripts/toolchain.mjs",
+    "dependencies": "node scripts/dependencies.mjs",
+    "build:windows": "node scripts/build-windows.mjs"
+  }
+}

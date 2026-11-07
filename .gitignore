@@ -1,0 +1,15 @@
+.work/
+.cache/
+artifacts/
+node_modules/
+local/
+.env
+.env.*
+!.env.example
+*.log
+*.pfx
+*.p12
+*.key
+*.pem
+.DS_Store
+Thumbs.db
