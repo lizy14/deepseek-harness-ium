@@ -153,7 +153,10 @@ export function isolatedEnvironment(directory, services, inherited = process.env
   const values = {};
   for (const key of ['SystemRoot', 'WINDIR', 'ComSpec', 'PATHEXT', 'SYSTEMDRIVE']) if (inherited[key]) values[key] = inherited[key];
   const folders = Object.fromEntries(['home', 'appdata', 'localappdata', 'temp', 'config', 'cache', 'data', 'dsh-home', 'user-data', 'npm-global', 'pnpm-home'].map(name => {
-    const destination = path.join(directory, name); fs.mkdirSync(destination, { recursive: true }); return [name, destination];
+    // Windows KnownFolder expands the fake USERPROFILE, independently of APPDATA overrides.
+    const destination = name === 'appdata' ? path.join(directory, 'home', 'AppData', 'Roaming')
+      : name === 'localappdata' ? path.join(directory, 'home', 'AppData', 'Local') : path.join(directory, name);
+    fs.mkdirSync(destination, { recursive: true }); return [name, destination];
   }));
   const userNpm = path.join(directory, 'empty-user.npmrc'), globalNpm = path.join(directory, 'empty-global.npmrc');
   fs.writeFileSync(userNpm, '', { flag: 'wx' }); fs.writeFileSync(globalNpm, '', { flag: 'wx' });

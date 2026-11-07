@@ -9,7 +9,7 @@ import {
   hash, isDeepSeek, routeSummary, newRunDirectory, writeResult, parseDevToolsPort, assertOwnedCdpPid,
   readAudit, summarizeDom, assessRun, startOfflineServices, isolatedEnvironment, readArtifactIdentity, validateIdentity,
 } from './helpers.mjs';
-import { runGuiSmoke } from '../../../scripts/gui-smoke.mjs';
+import { runGuiSmoke, revealSidebarNavigation, waitForEnabledControl } from '../../../scripts/gui-smoke.mjs';
 
 const recipe = fileURLToPath(new URL('../../../', import.meta.url));
 const base = path.join(process.env.IUM_WORK_DIR ?? path.join(recipe, '.work'), 'gui-smoke-fixture-tests');
@@ -134,6 +134,61 @@ test('child environment excludes credentials and real npm settings', t => {
   assert.ok(result.env.npm_config_userconfig.startsWith(directory + path.sep));
   assert.equal(result.env.NODE_USE_ENV_PROXY, '1'); assert.equal(result.env.IUM_NPM_REGISTRY, 'http://127.0.0.1:1235/');
   for (const file of result.emptyNpmConfigs) assert.equal(fs.readFileSync(file, 'utf8'), '');
+});
+test('fake Windows KnownFolders exist beneath the isolated USERPROFILE', t => {
+  const directory = fixture(t);
+  const result = isolatedEnvironment(directory, { proxyUrl: 'http://127.0.0.1:1234', registryUrl: 'http://127.0.0.1:1235/' }, {
+    SystemRoot: 'C:\\Windows', USERPROFILE: 'C:\\real-profile', APPDATA: 'C:\\real-roaming', LOCALAPPDATA: 'C:\\real-local',
+  });
+  assert.equal(result.env.USERPROFILE, result.folders.home);
+  assert.equal(result.env.APPDATA, path.join(result.env.USERPROFILE, 'AppData', 'Roaming'));
+  assert.equal(result.env.LOCALAPPDATA, path.join(result.env.USERPROFILE, 'AppData', 'Local'));
+  for (const key of ['appdata', 'localappdata']) {
+    assert.equal(result.folders[key], result.env[key === 'appdata' ? 'APPDATA' : 'LOCALAPPDATA']);
+    assert.equal(fs.statSync(result.folders[key]).isDirectory(), true);
+    assert.ok(fs.realpathSync.native(result.folders[key]).startsWith(fs.realpathSync.native(directory) + path.sep));
+  }
+  assert.equal(fs.existsSync(path.join(directory, 'appdata')), false);
+  assert.equal(fs.existsSync(path.join(directory, 'localappdata')), false);
+  assert.notEqual(result.folders['dsh-home'], result.folders.home);
+  assert.notEqual(result.folders['user-data'], result.folders.appdata);
+});
+test('sidebar navigation waits through loading before opening the collapsed sidebar', async () => {
+  let probes = 0, visible = false, clicks = 0, visibilityChecks = 0;
+  const plugins = {
+    async count() { probes++; return probes >= 2 ? 1 : 0; },
+    first() { return this; }, async isVisible() { return visible; },
+    async waitFor(options) { assert.equal(options.state, 'visible'); assert.equal(visible, true); visibilityChecks++; },
+  };
+  const sidebar = {
+    async count() { return probes >= 2 ? 1 : 0; }, first() { return this; },
+    async isVisible() { return probes >= 2; },
+    async click() { assert.ok(probes >= 2); clicks++; visible = true; },
+  };
+  await revealSidebarNavigation(plugins, sidebar, Date.now() + 3000, { closed: false });
+  assert.equal(clicks, 1); assert.equal(visibilityChecks, 1);
+});
+test('already visible Plugins does not toggle the sidebar closed', async () => {
+  let clicks = 0, asserted = false;
+  const plugins = { async count() { return 1; }, first() { return this; }, async isVisible() { return true; }, async waitFor(options) { assert.equal(options.state, 'visible'); asserted = true; } };
+  const sidebar = { async count() { return 1; }, first() { return this; }, async isVisible() { return true; }, async click() { clicks++; } };
+  await revealSidebarNavigation(plugins, sidebar, Date.now() + 3000, { closed: false });
+  assert.equal(clicks, 0); assert.equal(asserted, true);
+});
+test('missing navigation still fails rather than skipping readiness assertions', async () => {
+  const absent = { async count() { return 0; }, async waitFor() { assert.fail('Navigation never became ready'); } };
+  await assert.rejects(revealSidebarNavigation(absent, absent, Date.now() - 1, { closed: false }), /Timed out waiting/);
+});
+test('enabled control readiness waits through initial inventory loading', async () => {
+  let probes = 0;
+  const control = { async count() { return 1; }, first() { return this; }, async isVisible() { return true; }, async isEnabled() { return ++probes >= 2; } };
+  await waitForEnabledControl(control, 'enabled fixture control', Date.now() + 3000, { closed: false });
+  assert.equal(probes, 2);
+});
+test('persistently disabled control and exited process remain readiness failures', async () => {
+  const disabled = { async count() { return 1; }, first() { return this; }, async isVisible() { return true; }, async isEnabled() { return false; } };
+  await assert.rejects(waitForEnabledControl(disabled, 'disabled fixture', Date.now() - 1, { closed: false }), /Timed out waiting/);
+  await assert.rejects(waitForEnabledControl(disabled, 'disabled fixture', Date.now() + 1000, { closed: true }), /Desktop exited/);
 });
 test('artifact manifest identity/version is verified without executing a binary', t => {
   const directory = fixture(t), archive = path.join(directory, 'app.asar');

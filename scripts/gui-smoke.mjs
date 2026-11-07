@@ -55,6 +55,20 @@ async function domSummary(page, stage) {
   return summarizeDom(raw, stage);
 }
 async function isVisible(locator) { return await locator.count() > 0 && await locator.first().isVisible(); }
+/** Wait for the loaded navigation state before deciding whether its collapsed sidebar needs opening. */
+export async function revealSidebarNavigation(target, sidebar, deadline, processState) {
+  const state = await waitFor(async () => {
+    if (await isVisible(target)) return 'open';
+    if (await isVisible(sidebar)) return 'collapsed';
+    return null;
+  }, 'loaded navigation or Open sidebar control', deadline, processState);
+  if (state === 'collapsed' && !await isVisible(target)) await sidebar.first().click();
+  await target.waitFor({ state: 'visible', timeout: Math.min(60000, Math.max(1000, deadline - Date.now())) });
+}
+/** An asynchronously loaded control must become enabled; a persistent disabled state still fails. */
+export async function waitForEnabledControl(control, description, deadline, processState) {
+  await waitFor(async () => await isVisible(control) && await control.first().isEnabled(), description, Math.min(deadline, Date.now() + 60000), processState);
+}
 async function assertNoForcedLogin(page, stage) {
   const summary = await domSummary(page, stage);
   if (summary.forcedLogin.length) throw new Error('DeepSeek credential onboarding is visible at ' + stage);
@@ -173,9 +187,8 @@ export async function runGuiSmoke(options = {}) {
     page.setDefaultTimeout(15000);
     await page.waitForLoadState('domcontentloaded', { timeout: Math.max(1000, deadline - Date.now()) });
     const sidebar = page.getByRole('button', { name: labels.sidebar });
-    if (await isVisible(sidebar)) await sidebar.first().click();
     const plugins = page.getByRole('navigation', { name: labels.panels }).getByRole('button', { name: labels.plugins, exact: true });
-    await plugins.waitFor({ state: 'visible', timeout: Math.min(60000, Math.max(1000, deadline - Date.now())) });
+    await revealSidebarNavigation(plugins, sidebar, deadline, processState);
     const settings = page.getByRole('button', { name: labels.settings, exact: true });
     await settings.first().waitFor({ state: 'visible' });
     result.ready = true;
@@ -188,11 +201,13 @@ export async function runGuiSmoke(options = {}) {
     const add = page.getByRole('button', { name: labels.addPlugin, exact: true });
     await pluginsHeading.first().waitFor({ state: 'visible' });
     await add.first().waitFor({ state: 'visible' });
+    await waitForEnabledControl(add, 'enabled Add plugin control after inventory loading', deadline, processState);
     result.ui.plugins = { ...await assertNoForcedLogin(page, 'plugins'), headingVisible: await pluginsHeading.first().isVisible(), addControlVisible: await add.first().isVisible(), addControlEnabled: await add.first().isEnabled() };
     fs.writeFileSync(path.join(directory, 'plugins.dom.json'), JSON.stringify(result.ui.plugins, null, 2));
     if (options.screenshots) await page.screenshot({ path: path.join(directory, 'plugins.png'), fullPage: false });
     phase('plugins-reachable-no-install');
-    await page.getByRole('button', { name: labels.settings, exact: true }).first().click();
+    await revealSidebarNavigation(settings, sidebar, deadline, processState);
+    await settings.first().click();
     const dialog = page.getByRole('dialog', { name: labels.settings, exact: true });
     await dialog.waitFor({ state: 'visible' });
     const models = dialog.getByRole('button', { name: labels.models, exact: true });
