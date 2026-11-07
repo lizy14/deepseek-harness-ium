@@ -42,7 +42,7 @@ Keep the entire directory together. Its executable is not a single-file portable
 
 ## CI and release
 
-[The Windows CI template](../ci/windows-build.yml) pins Actions commits and uses a fresh hosted runner without signing secrets. It is intentionally stored outside the active workflows directory. Enabling it requires placing it at `.github/workflows/windows-build.yml` using a credential with GitHub's `workflow` permission. A `repo`-only OAuth token is insufficient; do not switch to a different account to evade that restriction.
+[The separately reviewed Windows CI template](https://github.com/lizy14/deepseek-harness-ium/blob/test/extended-validation/ci/windows-build.yml) pins Actions commits and uses a fresh hosted runner without signing secrets. It is intentionally stored outside the active workflows directory. Enabling it requires placing it at `.github/workflows/windows-build.yml` using a credential with GitHub's `workflow` permission. A `repo`-only OAuth token is insufficient; do not switch to a different account to evade that restriction.
 
 The template uploads unsigned candidates, not a production Release. Require the [verification stages](verification.md) and review the exact source input digest, version, runtime inventories and output hashes before publication. Retain the generated runtime dependency lock and packaging records: an upstream frozen workspace lock alone does not freeze every dependency materialized into the Desktop runtime.
 

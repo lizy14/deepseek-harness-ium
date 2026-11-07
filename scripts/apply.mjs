@@ -4,15 +4,17 @@ import { randomUUID } from 'node:crypto';
 import { root, work, upstream, readJson, sha256, within, run, verifyUpstream } from './lib.mjs';
 
 const pinned = verifyUpstream();
-const series = readJson(path.join(root, 'patches/series.json'));
+const groups = readJson(path.join(root, 'patches/groups.json'));
 const overlays = readJson(path.join(root, 'overlays.json'));
-if (series.schemaVersion !== 1 || overlays.schemaVersion !== 1) throw new Error('Unsupported patch/overlay manifest');
+if (groups.schemaVersion !== 1 || !Array.isArray(groups.groups) || groups.groups.length === 0 || overlays.schemaVersion !== 1) throw new Error('Unsupported patch/overlay manifest');
+const patches = groups.groups.map(group => group.file);
+if (patches.some(name => typeof name !== 'string' || !name.endsWith('.patch')) || new Set(patches).size !== patches.length) throw new Error('Invalid or duplicate patch group name');
 const stateFile = path.join(work, 'applied.json');
 const previous = fs.existsSync(stateFile) ? readJson(stateFile) : null;
 const checkDirectory = path.join(work, 'patch-checks');
 fs.mkdirSync(checkDirectory, { recursive: true });
 const patchResults = [];
-for (const name of series.patches) {
+for (const name of patches) {
   const file = within(path.join(root, 'patches'), name);
   if (!name.endsWith('.patch') || !fs.existsSync(file)) throw new Error(`Missing reviewed patch: ${name}`);
   const check = run('git', ['apply', '--check', '--whitespace=error-all', file], {

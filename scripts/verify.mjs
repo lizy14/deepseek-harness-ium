@@ -5,12 +5,15 @@ import { root, work, upstream, readJson, sha256, within, run, capture, verifyUps
 const pinned = verifyUpstream();
 const state = readJson(path.join(work, 'applied.json'));
 if (state.upstreamCommit !== pinned.commit) throw new Error('Applied state belongs to another upstream commit');
-const series = readJson(path.join(root, 'patches/series.json'));
+const groups = readJson(path.join(root, 'patches/groups.json'));
 const overlays = readJson(path.join(root, 'overlays.json'));
-if (state.patches.length !== series.patches.length || state.overlays.length !== overlays.files.length) throw new Error('Applied inputs differ from the declared manifests');
+if (groups.schemaVersion !== 1 || !Array.isArray(groups.groups) || groups.groups.length === 0) throw new Error('Unsupported patch groups manifest');
+const patches = groups.groups.map(group => group.file);
+if (patches.some(name => typeof name !== 'string' || !name.endsWith('.patch')) || new Set(patches).size !== patches.length) throw new Error('Invalid or duplicate patch group name');
+if (JSON.stringify(state.patches.map(item => item.path)) !== JSON.stringify(patches.map(name => 'patches/' + name)) || state.overlays.length !== overlays.files.length) throw new Error('Applied inputs differ from the declared manifests');
 const sections = text => new Map(text.split(/(?=^diff --git )/m).filter(part => part.startsWith('diff --git ')).map(part => [part.split('\n', 1)[0], part.replace(/\n+$/, '') + '\n']));
 const expected = new Map();
-for (const name of series.patches) {
+for (const name of patches) {
   const relative = 'patches/' + name;
   const data = fs.readFileSync(within(root, relative));
   const recorded = state.patches.find(item => item.path === relative);

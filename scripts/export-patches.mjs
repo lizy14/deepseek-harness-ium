@@ -4,8 +4,9 @@ import { root, upstream, readJson, within, capture, verifyUpstream } from './lib
 
 verifyUpstream();
 const groups = readJson(path.join(root, 'patches/groups.json'));
-const series = readJson(path.join(root, 'patches/series.json'));
-if (groups.schemaVersion !== 1 || JSON.stringify(groups.groups.map(group => group.file)) !== JSON.stringify(series.patches)) throw new Error('Patch groups and series do not agree');
+if (groups.schemaVersion !== 1 || !Array.isArray(groups.groups) || groups.groups.length === 0) throw new Error('Unsupported patch groups manifest');
+const patches = groups.groups.map(group => group.file);
+if (patches.some(name => typeof name !== 'string' || !name.endsWith('.patch')) || new Set(patches).size !== patches.length) throw new Error('Invalid or duplicate patch group name');
 const owned = new Set();
 for (const group of groups.groups) for (const file of group.paths) {
   within(upstream, file);
