@@ -954,6 +954,116 @@ index 5eaf0b2a35a354080b03d6fcae7d5421bf09cca5..34920559ae72f22239a050e42f4ceb51
        resolve: {
          conditionNames: [
            (process.env.NODE_ENV ?? 'production') === 'development' ? 'development' : 'production',
+diff --git a/packages/experimental/inspector/scripts/devtools/vite.ts b/packages/experimental/inspector/scripts/devtools/vite.ts
+index b521d8effaf9b66942e36b1c61a0fc07b6ee1832..f436cbe93b26a9ea9152f67c38739311e9c78cd1 100644
+--- a/packages/experimental/inspector/scripts/devtools/vite.ts
++++ b/packages/experimental/inspector/scripts/devtools/vite.ts
+@@ -13,7 +13,7 @@ const EMPTY = `${VIRTUAL}empty`
+ const ENTRIES = ['devtools_app', 'device_mode_emulation_frame', 'formatter_worker', 'heap_snapshot_worker', 'wasmparser_worker', 'lighthouse_worker'] as const
+ 
+ /**
+- * Build the English-only frontend from installed npm sources and local integration assets.
++ * Build the English-only frontend without physical source-region labels, retaining legal notices and runtime assets.
+  * @param output - Private output directory owned by the outer publication step.
+  */
+ export async function buildFrontend(output: string): Promise<void> {
+@@ -73,6 +73,7 @@ export const LOCAL_FETCH_PATTERN = "data:application/json,{}", REMOTE_FETCH_PATT
+     const result = await build({ ...base, plugins: [sourcePlugin()], build: {
+       write: false, minify: 'oxc', target: 'es2022', sourcemap: false,
+       lib: { entry: join(front, `${directory}.ts`), name: 'DevToolsInjected', formats: ['iife'] },
++      rolldownOptions: { experimental: { attachDebugInfo: 'none' }, output: { comments: { legal: true } } },
+     } })
+     const outputs = Array.isArray(result) ? result : [result]
+     const chunks = outputs.flatMap(item => 'output' in item ? item.output.filter(file => file.type === 'chunk') : [])
+@@ -110,7 +111,8 @@ export const LOCAL_FETCH_PATTERN = "data:application/json,{}", REMOTE_FETCH_PATT
+   }], build: {
+     outDir: output, emptyOutDir: true, minify: 'oxc', sourcemap: false, target: 'es2022', modulePreload: false,
+     lib: { entry: input, formats: ['es'] },
+-    rolldownOptions: { output: {
++    rolldownOptions: { experimental: { attachDebugInfo: 'none' }, output: {
++      comments: { legal: true },
+       entryFileNames: chunk => chunk.name === 'connect' ? 'connect.js' : entryFiles[chunk.name]!,
+       chunkFileNames: 'chunks/[name]-[hash].js',
+     } },
+diff --git a/packages/experimental/inspector/tests/devtools-build.host.spec.ts b/packages/experimental/inspector/tests/devtools-build.host.spec.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d9617bc9163ea36ef662ba17295f51d4d65544c1
+--- /dev/null
++++ b/packages/experimental/inspector/tests/devtools-build.host.spec.ts
+@@ -0,0 +1,73 @@
++/** Pins the DevTools build's generated source-label policy without changing legal comments or runtime exports. */
++import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import type { InlineConfig } from 'vite'
++import { expect, it, onTestFinished, vi } from 'vitest'
++import { buildFrontend } from '../scripts/devtools/vite.ts'
++
++const interceptedBuild = vi.hoisted(() => vi.fn(async (_config: InlineConfig) => ({
++  output: [{ type: 'chunk', code: '/* fixture injected script */' }],
++})))
++vi.mock('vite', async () => ({ ...await vi.importActual<typeof import('vite')>('vite'), build: interceptedBuild }))
++
++it('disables generated region labels for all DevTools builds while preserving legal comments and exports', async () => {
++  const root = mkdtempSync(join(tmpdir(), 'dsh-devtools-source-labels-'))
++  onTestFinished(() => { rmSync(root, { recursive: true, force: true }) })
++  interceptedBuild.mockClear()
++  await buildFrontend(join(root, 'frontend'))
++  expect(interceptedBuild).toHaveBeenCalledTimes(3)
++  const configs = interceptedBuild.mock.calls.map(([config]) => config)
++  for (const config of configs) {
++    expect(config.build?.rolldownOptions?.experimental?.attachDebugInfo).toBe('none')
++    expect(config.build?.rolldownOptions?.output).toMatchObject({ comments: { legal: true } })
++  }
++  const main = configs[2]?.build
++  if (main === undefined) throw new Error('DevTools module build missing')
++  const { minify, target } = main
++  if (minify === undefined || target === undefined) throw new Error('DevTools transform options missing')
++  expect(main).toMatchObject({ minify: 'oxc', sourcemap: false, target: 'es2022', modulePreload: false })
++  expect(main.rolldownOptions?.output).toMatchObject({ chunkFileNames: 'chunks/[name]-[hash].js' })
++  const outputOptions = main.rolldownOptions?.output
++  if (outputOptions === undefined || Array.isArray(outputOptions)) throw new Error('DevTools output options missing')
++  const comments = outputOptions.comments
++  if (comments === undefined) throw new Error('DevTools legal comment options missing')
++
++  const entry = join(root, 'fixture', 'entry.js')
++  mkdirSync(join(root, 'fixture'))
++  writeFileSync(entry, 'export { answer } from "virtual-fixture"\n')
++  const virtual = '\0fixture:C:/fixture/source/labels.js'
++  const { build } = await vi.importActual<typeof import('vite')>('vite')
++  const compile = async (attachDebugInfo: 'simple' | 'none') => {
++    const result = await build({
++      configFile: false, root, publicDir: false, logLevel: 'silent',
++      plugins: [{
++        name: 'fixture-source-labels',
++        resolveId(source) { return source === 'virtual-fixture' ? virtual : null },
++        load(id) { return id === virtual ? '/*! @license DevTools fixture (MIT) */\nexport const answer = 6 * 7\n' : null },
++      }],
++      build: {
++        write: false, minify, target, sourcemap: false,
++        lib: { entry, formats: ['es'] },
++        rolldownOptions: {
++          experimental: { ...main.rolldownOptions?.experimental, attachDebugInfo },
++          output: { comments },
++        },
++      },
++    })
++    const outputs = Array.isArray(result) ? result : [result]
++    const chunks = outputs.flatMap(item => 'output' in item ? item.output.filter(output => output.type === 'chunk') : [])
++    if (chunks.length !== 1) throw new Error('Unexpected privacy fixture output')
++    return chunks[0]!.code
++  }
++  const labeled = await compile('simple')
++  expect(labeled).toMatch(/\/\/#region[^\r\n]*C:\/fixture\/source\/labels\.js/)
++  const output = await compile('none')
++  expect(output).not.toMatch(/\/\/#(?:end)?region\b/)
++  expect(output).not.toContain('C:/fixture/source/labels.js')
++  expect(output).toContain('@license DevTools fixture (MIT)')
++  const actual = await import(`data:text/javascript,${encodeURIComponent(output)}`) as { answer: number }
++  const control = await import(`data:text/javascript,${encodeURIComponent(labeled)}`) as { answer: number }
++  expect(actual.answer).toBe(control.answer)
++  expect(actual.answer).toBe(42)
++})
 diff --git a/scripts/ci-workflow.spec.ts b/scripts/ci-workflow.spec.ts
 index 26d13714c173aaea7ef89bcc2192cd8edf0e9e96..cdf905caff590054de2be1697400e2f85c5f597f 100644
 --- a/scripts/ci-workflow.spec.ts

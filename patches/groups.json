@@ -22,6 +22,8 @@
         "apps/desktop/tests/package-macos.spec.ts",
         "package.json",
         "packages/client/tsdown.client.ts",
+        "packages/experimental/inspector/scripts/devtools/vite.ts",
+        "packages/experimental/inspector/tests/devtools-build.host.spec.ts",
         "scripts/client-bundle-purity.spec.ts",
         "scripts/ci-workflow.spec.ts",
         "scripts/compile-referenced-projects.spec.ts",
