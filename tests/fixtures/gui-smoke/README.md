@@ -7,7 +7,7 @@ This fixture targets a **completed Windows directory artifact**, not the origina
 Use Node 24.21.0 and set `IUM_WORK_DIR` to the non-synchronized build directory. The default artifact is its `upstream/apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked` folder. The runner imports the existing `playwright-core@1.61.1` package from that upstream dependency tree; it never installs Playwright or browsers.
 
 ```powershell
-node scripts/gui-smoke.mjs --build-version 0.2.2-rc.1.20261107.1
+node scripts/gui-smoke.mjs --build-version 0.2.2-rc.1.20261108.1
 # Optional controlled screenshots of this fresh fixture only:
 node scripts/gui-smoke.mjs --artifact-dir '<absolute directory artifact>' --build-version '<exact candidate>' --screenshots
 ```

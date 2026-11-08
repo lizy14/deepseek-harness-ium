@@ -43,6 +43,8 @@ jobs:
         run: |
           node --test --test-isolation=none --test-concurrency=1 'tests/*.test.mjs'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test --test-isolation=none --test-concurrency=1 tests/fixtures/gui-smoke/self-test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/test-upstream.mjs
           exit $LASTEXITCODE
       - name: Compile artifacts and aggregate types
