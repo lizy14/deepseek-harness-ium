@@ -11,7 +11,7 @@
   },
   "initialModel": {
     "provider": "github-copilot",
-    "model": "gpt-4.1"
+    "model": "gpt-6-astra"
   },
   "registryEnvironment": "IUM_NPM_REGISTRY",
   "networkPolicy": "deny-deepseek-domains-v1"

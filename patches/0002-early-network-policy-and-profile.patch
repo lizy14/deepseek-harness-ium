@@ -1,3 +1,479 @@
+diff --git a/apps/cli/src/args.ts b/apps/cli/src/args.ts
+index 41d4ebeaa832473b25952af1b185e02a7c182844..b38f5579c14d3b8979b3824705ac33218c86cfd7 100644
+--- a/apps/cli/src/args.ts
++++ b/apps/cli/src/args.ts
+@@ -35,7 +35,7 @@ interface DumpConfigInvocation {
+   profile: string
+   /** Shipped template that replaces the named profile. */
+   fromDefaultProfile?: string | undefined
+-  /** Omit the profile's user layer and --patch overlays; print bundle layers only. */
++  /** Omit profile, home, and --patch overrides; retain bundle and installation deployment layers. */
+   defaultOnly: boolean
+   patches: string[]
+ }
+@@ -130,7 +130,7 @@ function resolveBoot(program: Command, profile: string, options: BootOptions, ar
+   }
+   const defaultOnly = options.dumpDefaultConfig === true
+   if (defaultOnly && patches.length > 0) {
+-    program.error('error: --dump-default-config prints the bundle layers and takes no --patch')
++    program.error('error: --dump-default-config prints bundle and installation deployment layers and takes no --patch')
+   }
+   return { mode: 'dump-config', profile, fromDefaultProfile: options.fromDefaultProfile, defaultOnly, patches }
+ }
+@@ -170,7 +170,7 @@ export function parseDshArgs(argv: readonly string[], version: string, manageDes
+     .option('--patch <path>', 'extra patch-list overlay applied after the profile layer (repeatable)', collect)
+     .option('--dump-config', 'print the composed profile tree and exit')
+     .option('--dump-config-schema', 'print JSON Schema for profile entries and patches without mounting')
+-    .option('--dump-default-config', 'print the profile tree without its user layer or --patch overlays and exit')
++    .option('--dump-default-config', 'print bundle and installation deployment layers without user or --patch overrides and exit')
+     .action((args: string[], options: BootOptions & { profile?: string }) => {
+       // With the app owning -h, the launcher's own help is what a bare
+       // `dsh -h` (no profile to hand it to) must print.
+diff --git a/apps/cli/src/bin.ts b/apps/cli/src/bin.ts
+index 1ae0c4a59182c3ebe7dd38fcc17292e185332cdc..c792373d98f7d10af070312650c7e4237ad1e96b 100644
+--- a/apps/cli/src/bin.ts
++++ b/apps/cli/src/bin.ts
+@@ -16,16 +16,18 @@ import type { RunProfileOptions } from './profile-boot.ts'
+ export type RunCliOptions = Pick<RunProfileOptions, 'packageManager'> & {
+   /** Permit plugin commands for Desktop's existing profile; reserved for its installed carrier. */
+   manageDesktopProfile?: boolean
++  /** Installation-owned overlays applied after user patches, including in default dumps; omitted adds none. */
++  deploymentPatchFiles?: readonly string[]
+ }
+ 
+ /**
+  * Run the public dsh command-line interface.
+- * @param options - Package runtime and Desktop profile access supplied by the installation.
++ * @param options - Package runtime, Desktop profile access, and final deployment overlays supplied by the installation.
+  * @returns a promise that settles when the selected command mode finishes.
+  */
+ export async function runCli(options: RunCliOptions = {}): Promise<void> {
+   const version = getDshRuntimeVersion()
+-  const { manageDesktopProfile, ...profileOptions } = options
++  const { manageDesktopProfile, deploymentPatchFiles = [], ...profileOptions } = options
+   const invocation = parseDshArgs(process.argv.slice(2), version, manageDesktopProfile)
+ 
+   switch (invocation.mode) {
+@@ -36,7 +38,7 @@ export async function runCli(options: RunCliOptions = {}): Promise<void> {
+           environment: loadLayeredEnv('dsh'),
+           profile: invocation.profile,
+           fromDefaultProfile: invocation.fromDefaultProfile,
+-          patchFiles: invocation.patches,
++          patchFiles: [...invocation.patches, ...deploymentPatchFiles],
+           args: invocation.args,
+           ...profileOptions,
+         })
+@@ -59,12 +61,13 @@ export async function runCli(options: RunCliOptions = {}): Promise<void> {
+         invocation.defaultOnly,
+         invocation.patches,
+         invocation.fromDefaultProfile,
++        deploymentPatchFiles,
+       )
+       break
+     }
+     case 'dump-config-schema': {
+       const { runDumpConfigSchema } = await import('./dump-config-schema.ts')
+-      await runDumpConfigSchema(invocation.profile, invocation.patches, invocation.fromDefaultProfile)
++      await runDumpConfigSchema(invocation.profile, invocation.patches, invocation.fromDefaultProfile, deploymentPatchFiles)
+       break
+     }
+     default:
+diff --git a/apps/cli/src/dump-config-schema.ts b/apps/cli/src/dump-config-schema.ts
+index 0938ab56a6cbc51757beb51c310a8ff724e4272b..470d7ea402fb3004b752e039565755f849f791bd 100644
+--- a/apps/cli/src/dump-config-schema.ts
++++ b/apps/cli/src/dump-config-schema.ts
+@@ -20,15 +20,17 @@ const NAME = 'dsh'
+  * @param profile - the profile name.
+  * @param patches - overlay paths, in argv order.
+  * @param fromDefaultProfile - shipped template that replaces the profile before loading it.
++ * @param deploymentPatchFiles - installation-owned overlays applied after every user layer; omitted adds none.
+  * @returns after collection and output, with diagnostics also written to stderr.
+  */
+ export async function runDumpConfigSchema(
+   profile: string,
+   patches: readonly string[],
+   fromDefaultProfile?: string,
++  deploymentPatchFiles: readonly string[] = [],
+ ): Promise<void> {
+   const loaded = prepareProfile(profile, true, fromDefaultProfile)
+-  const layers = collectConfigDumpLayers(loaded, false, patches)
++  const layers = collectConfigDumpLayers(loaded, false, patches, deploymentPatchFiles)
+   // oxlint-disable-next-line typescript/unbound-method -- Saved only for exact restoration, never called unbound.
+   const stdoutWrite = process.stdout.write
+   let dump: ConfigSchemaDump
+diff --git a/apps/cli/src/dump-config.ts b/apps/cli/src/dump-config.ts
+index 9e1de83917b1959956e85bb08e6d1eab29eb1f67..dd7499df75f9488b55df39cb1ce903e59f89f8a1 100644
+--- a/apps/cli/src/dump-config.ts
++++ b/apps/cli/src/dump-config.ts
+@@ -2,7 +2,7 @@
+  * Config-dump entry for `dsh --profile <name> --dump-config`: compose the
+  * profile's patch layers through the include plugin's patch algorithm without
+  * booting or evaluating `!!js`, with one source layer per bundle, the
+- * profile's own patch file, and each `--patch` overlay.
++ * profile's own patch file, each `--patch` overlay, and final installation overlays.
+  * @module @deepseek-ai/dsh/dump-config
+  */
+ 
+@@ -23,35 +23,38 @@ const NAME = 'dsh'
+ /**
+  * Print a profile composition with comments naming each source file and patch layer.
+  * @param profile - the profile name.
+- * @param defaultOnly - omit the profile's user layer and `--patch` overlays
+- * (the recovery diagnostic for a broken `cordis.patch.yml`, which is then
+- * never parsed).
++ * @param defaultOnly - omit profile, home, and `--patch` overrides without reading them;
++ * retain bundle and installation deployment layers for recovery diagnostics.
+  * @param patches - `--patch` overlay paths, in argv order.
+  * @param fromDefaultProfile - shipped template that replaces the profile before loading it.
++ * @param deploymentPatchFiles - installation-owned overlays applied last; omitted adds no deployment layer.
+  */
+ export function runDumpConfig(
+   profile: string,
+   defaultOnly: boolean,
+   patches: readonly string[],
+   fromDefaultProfile?: string,
++  deploymentPatchFiles: readonly string[] = [],
+ ): void {
+   const loaded = prepareProfile(profile, !defaultOnly, fromDefaultProfile)
+-  const layers = collectConfigDumpLayers(loaded, defaultOnly, patches)
++  const layers = collectConfigDumpLayers(loaded, defaultOnly, patches, deploymentPatchFiles)
+   // The dump anchors on the same empty root file the boot includes.
+   process.stdout.write(renderConfigDump(NAME, join(loaded.dir, PROFILE_ROOT_FILENAME), layers))
+ }
+ 
+ /**
+- * Read dump layers in bundle, profile, home, then argv order without composing them.
++ * Read dump layers in bundle, profile, home, argv, then installation order without composing them.
+  * @param loaded - prepared profile and parsed bundle and profile patches.
+  * @param defaultOnly - omit profile, home, and argv layers without reading their files.
+  * @param patches - overlay paths relative to the invoking directory, in argv order.
++ * @param deploymentPatchFiles - installation-owned overlays retained even for defaults; omitted adds none.
+  * @returns the labeled layers shared by YAML and schema dumps.
+  */
+ export function collectConfigDumpLayers(
+   loaded: Profile,
+   defaultOnly: boolean,
+   patches: readonly string[],
++  deploymentPatchFiles: readonly string[] = [],
+ ): ConfigDumpLayer[] {
+   const layers: ConfigDumpLayer[] = loaded.layers.map(layer => ({
+     label: layer.packageName,
+@@ -71,6 +74,10 @@ export function collectConfigDumpLayers(
+       layers.push({ label: absolute, patches: loadOverlayPatches(NAME, absolute) })
+     }
+   }
++  for (const file of deploymentPatchFiles) {
++    const absolute = resolve(file)
++    layers.push({ label: absolute, patches: loadOverlayPatches(NAME, absolute) })
++  }
+   return layers
+ }
+ /* v8 ignore stop */
+diff --git a/apps/cli/tests/deployment-patches.spec.ts b/apps/cli/tests/deployment-patches.spec.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..6cf712df40aba132a114fea6729d9f18d3278026
+--- /dev/null
++++ b/apps/cli/tests/deployment-patches.spec.ts
+@@ -0,0 +1,221 @@
++/** Installation overlays stay last across the official CLI's boot and dump dispatch. */
++import { basename, dirname, join, relative } from 'node:path'
++import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
++import { pathToFileURL } from 'node:url'
++import { load } from 'js-yaml'
++import {
++  composeEntries, generateConfigSchema, initProfile, loadLayeredEnv,
++} from '@deepseek-ai/dsh-app-boot'
++import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
++import { runCli } from '../src/bin.ts'
++import { collectConfigDumpLayers } from '../src/dump-config.ts'
++import { prepareProfile, runProfile } from '../src/profile-boot.ts'
++import { runPlugin } from '../src/plugin.ts'
++
++const installation = vi.hoisted(() => ({ anchor: '' }))
++
++vi.mock('@deepseek-ai/dsh-app-boot', async (importOriginal) => {
++  const actual = await importOriginal<typeof import('@deepseek-ai/dsh-app-boot')>()
++  const { createLaunchEnvironmentSnapshot } = await import('@deepseek-ai/dsh-launch-environment')
++  return {
++    ...actual,
++    getDshRuntimeVersion: () => '1.2.3',
++    // Never discover the invoking directory's or the developer's credential environment.
++    loadLayeredEnv: vi.fn(() => createLaunchEnvironmentSnapshot([])),
++    generateConfigSchema: vi.fn(actual.generateConfigSchema),
++  }
++})
++vi.mock('../src/profile-boot.ts', async (importOriginal) => {
++  const actual = await importOriginal<typeof import('../src/profile-boot.ts')>()
++  // Dispatch is the subject; no application or long-lived plugin tree starts here.
++  return { ...actual, get INSTALL_ANCHOR() { return installation.anchor }, runProfile: vi.fn(async () => {}) }
++})
++vi.mock('../src/plugin.ts', () => ({ runPlugin: vi.fn(async () => 0) }))
++
++const originalArgv = process.argv
++const originalExitCode = process.exitCode
++
++beforeEach(() => {
++  // Native DLLs can stay locked until process exit; keep their cache in Git-ignored test output.
++  vi.stubEnv('NARB_NATIVE_CACHE_DIR', join(import.meta.dirname, 'tmp', 'deployment-native-cache'))
++  vi.clearAllMocks()
++  vi.spyOn(process.stdout, 'write').mockReturnValue(true)
++  vi.spyOn(process.stderr, 'write').mockReturnValue(true)
++  vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('CLI deployment tests are offline'))))
++})
++afterEach(() => {
++  process.argv = originalArgv
++  process.exitCode = originalExitCode
++  vi.unstubAllEnvs()
++  vi.unstubAllGlobals()
++  vi.restoreAllMocks()
++})
++
++function argv(...args: string[]): void {
++  process.argv = [process.execPath, 'installation-cli.js', ...args]
++}
++function stdout(): string {
++  return vi.mocked(process.stdout.write).mock.calls.map(([chunk]) => String(chunk)).join('')
++}
++function override(source: string, disabled: boolean): string {
++  return `- id: target\n  disabled: ${String(disabled)}\n  config: { enabled: ${String(!disabled)}, source: ${source} }\n`
++}
++
++/** Each fixture lives beside this source test, never in an ambient home or synchronized temp directory. */
++function fixture() {
++  const parent = realpathSync(import.meta.dirname)
++  const home = mkdtempSync(join(parent, '.deployment-patches-'))
++  onTestFinished(() => {
++    const target = realpathSync(home)
++    if (dirname(target) !== parent || !basename(target).startsWith('.deployment-patches-')) {
++      throw new Error('Refusing unexpected deployment fixture cleanup path')
++    }
++    rmSync(target, { recursive: true, force: true })
++  })
++  const runtime = join(home, 'installation')
++  mkdirSync(runtime)
++  installation.anchor = join(runtime, 'package.json')
++  writeFileSync(installation.anchor, '{"name":"deployment-test-runtime","version":"1.0.0"}\n')
++  vi.stubEnv('DSH_HOME', home)
++  vi.stubEnv('DSH_TELEMETRY_DISABLED', '')
++  const profile = 'deployment-fixture'
++  const dir = join(home, 'profiles', profile)
++  initProfile(dir, ['deployment-fixture-bundle'])
++  const bundle = join(dir, 'node_modules', 'deployment-fixture-bundle')
++  mkdirSync(bundle, { recursive: true })
++  writeFileSync(join(bundle, 'package.json'), JSON.stringify({
++    name: 'deployment-fixture-bundle', version: '1.0.0', type: 'module', dsh: { bundle: { patch: './cordis.patch.yml' } },
++  }))
++  const plugin = join(bundle, 'plugin.mjs')
++  writeFileSync(plugin, 'export function apply() { throw new Error("Configuration inspection must not apply plugins") }\n')
++  writeFileSync(join(bundle, 'cordis.patch.yml'), [
++    '- insert:', '    - id: target', `      name: ${JSON.stringify(pathToFileURL(plugin).href)}`,
++    '      disabled: false', '      config: { enabled: true, source: bundle }', '',
++  ].join('\n'))
++  const profilePatch = join(dir, 'cordis.patch.yml')
++  const homePatch = join(home, 'cordis.patch.yml')
++  const userPatch = join(home, 'user.yml')
++  const deployment = join(home, 'deployment.yml')
++  const finalDeployment = join(home, 'deployment-final.yml')
++  writeFileSync(profilePatch, override('profile', false))
++  writeFileSync(homePatch, override('home', false))
++  writeFileSync(userPatch, override('argv', false))
++  writeFileSync(deployment, override('deployment', false))
++  writeFileSync(finalDeployment, override('deployment-final', true))
++  const deploymentPatchFiles = Object.freeze([deployment, finalDeployment])
++  return { home, profile, dir, profilePatch, homePatch, userPatch, deployment, finalDeployment, deploymentPatchFiles }
++}
++
++describe('installation deployment patches', () => {
++  it('passes immutable deployment paths after argv overlays without changing app arguments', async () => {
++    const f = fixture()
++    const packageManager = { command: process.execPath, args: ['pnpm.mjs'], env: {} }
++    argv(f.profile, '--patch', f.userPatch, '--patch', f.deployment, 'task', '--patch', 'app-owned.yml')
++
++    await runCli({ deploymentPatchFiles: f.deploymentPatchFiles, packageManager })
++
++    expect(runProfile).toHaveBeenCalledExactlyOnceWith({
++      environment: vi.mocked(loadLayeredEnv).mock.results[0]!.value,
++      profile: f.profile,
++      fromDefaultProfile: undefined,
++      patchFiles: [f.userPatch, f.deployment, ...f.deploymentPatchFiles],
++      args: ['task', '--patch', 'app-owned.yml'],
++      packageManager,
++    })
++    expect(f.deploymentPatchFiles).toEqual([f.deployment, f.finalDeployment])
++  })
++
++  it('preserves profile dispatch without installation overlays or new launcher flags', async () => {
++    argv('custom', '--patch', 'user.yml', '--deployment-patch', 'not-a-launcher-option.yml')
++    await runCli()
++    expect(runProfile).toHaveBeenCalledWith(expect.objectContaining({
++      patchFiles: ['user.yml'], args: ['--deployment-patch', 'not-a-launcher-option.yml'],
++    }))
++  })
++
++  it('renders final deployment values after profile, home and argv attempts to enable the row', async () => {
++    const f = fixture()
++    const before = [f.profilePatch, f.homePatch, f.userPatch].map(file => readFileSync(file, 'utf8'))
++    argv(f.profile, '--patch', relative(process.cwd(), f.userPatch), '--dump-config')
++    await runCli({ deploymentPatchFiles: f.deploymentPatchFiles })
++
++    expect(load(stdout())).toEqual([expect.objectContaining({
++      id: 'target', disabled: true, config: { enabled: false, source: 'deployment-final' },
++    })])
++    expect([f.profilePatch, f.homePatch, f.userPatch].map(file => readFileSync(file, 'utf8'))).toEqual(before)
++    expect(loadLayeredEnv).not.toHaveBeenCalled()
++    expect(runProfile).not.toHaveBeenCalled()
++  })
++
++  it('retains deployment defaults without reading malformed user or home layers', async () => {
++    const f = fixture()
++    for (const file of [f.profilePatch, f.homePatch, f.userPatch]) writeFileSync(file, 'invalid: [\n')
++    argv(f.profile, '--dump-default-config')
++    await runCli({ deploymentPatchFiles: f.deploymentPatchFiles })
++
++    expect(load(stdout())).toEqual([expect.objectContaining({
++      id: 'target', disabled: true, config: { enabled: false, source: 'deployment-final' },
++    })])
++    const loaded = prepareProfile(f.profile, false)
++    const layers = collectConfigDumpLayers(loaded, true, [f.userPatch], f.deploymentPatchFiles)
++    expect(layers.map(layer => layer.label)).toEqual(['deployment-fixture-bundle', ...f.deploymentPatchFiles])
++    expect([f.profilePatch, f.homePatch, f.userPatch].map(file => readFileSync(file, 'utf8'))).toEqual([
++      'invalid: [\n', 'invalid: [\n', 'invalid: [\n',
++    ])
++  })
++
++  it.each([false, true])('preserves dump composition without deployment input (defaults=%s)', async (defaultOnly) => {
++    const f = fixture()
++    argv(f.profile, ...defaultOnly ? ['--dump-default-config'] : ['--patch', f.userPatch, '--dump-config'])
++    await runCli()
++    expect(load(stdout())).toEqual([expect.objectContaining({
++      id: 'target', disabled: false, config: { enabled: true, source: defaultOnly ? 'bundle' : 'argv' },
++    })])
++  })
++
++  it.each([false, true])('uses the same final layers for schema inspection (deployment=%s)', async (deployed) => {
++    const f = fixture()
++    argv(f.profile, '--patch', f.userPatch, '--dump-config-schema')
++    await runCli(deployed ? { deploymentPatchFiles: f.deploymentPatchFiles } : {})
++
++    expect(generateConfigSchema).toHaveBeenCalledOnce()
++    const layers = vi.mocked(generateConfigSchema).mock.calls[0]![1]
++    expect(composeEntries(layers)).toEqual([expect.objectContaining({
++      id: 'target', disabled: deployed, config: {
++        enabled: !deployed, source: deployed ? 'deployment-final' : 'argv',
++      },
++    })])
++    expect(JSON.parse(stdout())).toMatchObject({ 'x-cordis': {
++      profile: f.profile, complete: true, entries: [expect.objectContaining({ id: 'target' })],
++    } })
++    expect(loadLayeredEnv).not.toHaveBeenCalled()
++    expect(runProfile).not.toHaveBeenCalled()
++  })
++
++  it.each(['--dump-config', '--dump-default-config', '--dump-config-schema'])(
++    'rejects missing or malformed installation overlays for %s', async (flag) => {
++      const f = fixture()
++      const malformed = join(f.home, 'malformed.yml')
++      writeFileSync(malformed, 'invalid: [\n')
++      for (const file of [join(f.home, 'missing.yml'), malformed]) {
++        argv(f.profile, flag)
++        await expect(runCli({ deploymentPatchFiles: [file] })).rejects.toThrow()
++      }
++      expect(generateConfigSchema).not.toHaveBeenCalled()
++      expect(stdout()).toBe('')
++    },
++  )
++
++  it('keeps the official Desktop plugin command and package-manager invocation separate from profile overlays', async () => {
++    const f = fixture()
++    const packageManager = { command: process.execPath, args: ['pnpm.mjs'], env: {} }
++    const exit = new Error('captured CLI exit')
++    vi.spyOn(process, 'exit').mockImplementation(() => { throw exit })
++    argv('plugin', '--profile', 'desktop', 'list')
++    await expect(runCli({ manageDesktopProfile: true, deploymentPatchFiles: f.deploymentPatchFiles, packageManager }))
++      .rejects.toBe(exit)
++    expect(runPlugin).toHaveBeenCalledExactlyOnceWith('desktop', ['list'], packageManager)
++    expect(runProfile).not.toHaveBeenCalled()
++    expect(loadLayeredEnv).not.toHaveBeenCalled()
++  })
++})
+diff --git a/apps/cli/tests/resolved-profile-boot.spec.ts b/apps/cli/tests/resolved-profile-boot.spec.ts
+index 6e7bc520609e63e8e718e51757b73b0e1eb72e9e..16e9312a324e03fd0dfff1962e0b11dbfc8217dd 100644
+--- a/apps/cli/tests/resolved-profile-boot.spec.ts
++++ b/apps/cli/tests/resolved-profile-boot.spec.ts
+@@ -6,11 +6,11 @@ import { join } from 'node:path'
+ import { Context } from '@deepseek-ai/cordis'
+ import { createLaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
+ import {
+-  boot, composeEntries, createRuntimeResolution,
++  boot, composeEntries, createRuntimeResolution, readProfilePatches,
+   PluginPackages, type Profile,
+ } from '@deepseek-ai/dsh-app-boot'
+ import { installProxyFromEnvironment } from '@deepseek-ai/dsh-http-proxy'
+-import { afterEach, describe, expect, it, vi } from 'vitest'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+ import { runProfile } from '../src/profile-boot.ts'
+ 
+ vi.mock('@deepseek-ai/dsh-app-boot', async (importOriginal) => {
+@@ -25,6 +25,10 @@ vi.mock('@deepseek-ai/dsh-app-boot', async (importOriginal) => {
+ vi.mock('@deepseek-ai/dsh-http-proxy', () => ({ installProxyFromEnvironment: vi.fn() }))
+ 
+ const homes: string[] = []
++beforeEach(() => {
++  // Native DLLs can stay locked until process exit; keep their cache in Git-ignored test output.
++  vi.stubEnv('NARB_NATIVE_CACHE_DIR', join(import.meta.dirname, 'tmp', 'resolved-profile-native-cache'))
++})
+ afterEach(() => {
+   vi.restoreAllMocks()
+   vi.unstubAllEnvs()
+@@ -117,9 +121,11 @@ describe('runProfile with an application-owned profile', () => {
+     const homePatch = join(home, 'cordis.patch.yml')
+     const profilePatch = join(home, 'profile.patch.yml')
+     const overlay = join(home, 'desktop.patch.yml')
++    const deployment = join(home, 'deployment.patch.yml')
+     writeFileSync(homePatch, '- id: target\n  config: { home: true, priority: home }\n')
+     writeFileSync(profilePatch, '- id: target\n  config: { profile: true, priority: profile }\n')
+     writeFileSync(overlay, '- id: target\n  config: { overlay: true, priority: overlay }\n')
++    writeFileSync(deployment, '- id: target\n  disabled: true\n  config: { enabled: false, priority: deployment }\n')
+     writeFileSync(join(home, 'cordis.yml'), '- id: stale\n')
+     const profile: Profile = { skippedBundles: [],
+       name: 'desktop', dir: home, patchPath: profilePatch,
+@@ -137,7 +143,7 @@ describe('runProfile with an application-owned profile', () => {
+     try {
+       const { shutdown } = await runProfile({
+         environment, profile: 'desktop', resolvedProfile: runtime,
+-        patchFiles: [overlay], args: ['--port', '0', '--no-open'],
++        patchFiles: [overlay, deployment], args: ['--port', '0', '--no-open'],
+       })
+       expect(installProxyFromEnvironment).toHaveBeenCalledWith(environment, expect.any(Function))
+       const resolution = vi.mocked(createRuntimeResolution).mock.settledResults
+@@ -156,14 +162,25 @@ describe('runProfile with an application-owned profile', () => {
+       expect(ready).toHaveBeenCalledOnce()
+       const patches = vi.mocked(boot).mock.calls[0]![2]!
+       const rows = composeEntries([patches])
+-      expect(patches.slice(1, 4)).toEqual([
++      expect(patches.slice(1, 5)).toEqual([
+         { id: 'target', config: { profile: true, priority: 'profile' } },
+         { id: 'target', config: { home: true, priority: 'home' } },
+         { id: 'target', config: { overlay: true, priority: 'overlay' } },
++        { id: 'target', disabled: true, config: { enabled: false, priority: 'deployment' } },
+       ])
+-      expect(rows.find(row => row.id === 'target')?.config).toEqual({ overlay: true, priority: 'overlay' })
++      expect(rows.find(row => row.id === 'target')).toMatchObject({
++        disabled: true, config: { enabled: false, priority: 'deployment' },
++      })
+       expect(rows.find(row => row.id === 'session-telemetry-otel')?.disabled).toBe(true)
+       expect(ctx.profileContext).toMatchObject({ dir: home, patchPath: profilePatch, installAnchor: runtime.installAnchor })
++      expect(ctx.profileContext.overlays.at(-1)).toEqual({
++        id: 'target', disabled: true, config: { enabled: false, priority: 'deployment' },
++      })
++      writeFileSync(homePatch, '- id: target\n  disabled: false\n  config: { enabled: true, priority: changed-home }\n')
++      const reloaded = composeEntries([readProfilePatches('dsh', ctx.profileContext, profile)])
++      expect(reloaded.find(row => row.id === 'target')).toMatchObject({
++        disabled: true, config: { enabled: false, priority: 'deployment' },
++      })
+       await shutdown.shutdown(0)
+       expect(dispose).toHaveBeenCalledOnce()
+       expect(disposeProxy).toHaveBeenCalledOnce()
 diff --git a/apps/desktop-host/package.json b/apps/desktop-host/package.json
 index dec1b3f5fe26c5ac889a9b1ff3217912c9025699..396d0ba669982065931b3088496a4a4a8af209a0 100644
 --- a/apps/desktop-host/package.json
@@ -12,6 +488,68 @@ index dec1b3f5fe26c5ac889a9b1ff3217912c9025699..396d0ba669982065931b3088496a4a4a
    ],
    "dependencies": {
      "koffi": "3.1.1",
+diff --git a/apps/desktop-host/src/cli.ts b/apps/desktop-host/src/cli.ts
+index 6c890f8990d3a6a39a5b8df4b4e27d6c59df1623..6b029765e6d529b30e1ae15a67d46c87199ef464 100644
+--- a/apps/desktop-host/src/cli.ts
++++ b/apps/desktop-host/src/cli.ts
+@@ -2,23 +2,44 @@
+ 
+ import { delimiter, dirname, join, resolve } from 'node:path'
+ import { runCli } from '@deepseek-ai/dsh/lib/bin.js'
++import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
+ import { installOfficeEngineResolution, runtimeArchivePath } from './office-engine.ts'
+ 
++/** Build-owned CLI policy; omitted fields retain the ordinary Desktop CLI behavior. */
++export interface DesktopCliOptions {
++  /** Trusted deployment patches forwarded to the CLI; absent means no deployment patches. */
++  deploymentPatchFiles?: readonly string[]
++  /** Trusted file URL preloaded by managed pnpm; absent means no additional preload. */
++  networkPreload?: string
++}
++
++// The native registration lives until process exit, including concurrent imported invocations.
++let windowsCliSignals: Promise<void> | undefined
++
+ /**
+  * Run the ordinary CLI with Desktop's bundled package manager and reserved-profile plugin access.
+  * @param runtimeDir - Prepared or ASAR-contained production DSH package tree.
+  * @param supportDir - Physical Desktop runtime directory containing the primary-runtime payload and Node launchers.
++ * @param options - Build-owned deployment patches and pnpm preload; omitted preserves the official defaults.
+  * @returns Completion of the selected CLI command; profile plugins own their process lifetime.
+  */
+-export async function runDesktopCli(runtimeDir: string, supportDir: string): Promise<void> {
++export async function runDesktopCli(runtimeDir: string, supportDir: string, options: DesktopCliOptions = {}): Promise<void> {
++  if (process.platform === 'win32') {
++    await (windowsCliSignals ??= import('./windows-cli-signals.ts').then(module => module.installWindowsCliSignals()))
++  }
+   installOfficeEngineResolution(runtimeDir)
+   await runCli({
+     manageDesktopProfile: true,
++    ...(options.deploymentPatchFiles === undefined ? {} : { deploymentPatchFiles: options.deploymentPatchFiles }),
+     packageManager: {
+       command: process.execPath,
+-      args: ['--expose-internals', join(supportDir, 'primary-runtime', 'dependencies', 'pnpm', 'bin', 'pnpm.mjs')],
++      args: [
++        ...(options.networkPreload === undefined ? [] : ['--import', options.networkPreload]),
++        '--expose-internals', join(supportDir, 'primary-runtime', 'dependencies', 'pnpm', 'bin', 'pnpm.mjs'),
++      ],
+       env: {
+         ELECTRON_RUN_AS_NODE: '1',
++        ...(options.networkPreload === undefined ? {} : { DSH_HOME: resolveDshHome() }),
+         DSH_DESKTOP_NODE_EXECUTABLE: process.execPath,
+         PATH: `${join(supportDir, 'bin')}${delimiter}${process.env.PATH ?? ''}`,
+       },
+@@ -27,10 +48,6 @@ export async function runDesktopCli(runtimeDir: string, supportDir: string): Pro
+ }
+ 
+ if (import.meta.main) {
+-  if (process.platform === 'win32') {
+-    const { installWindowsCliSignals } = await import('./windows-cli-signals.ts')
+-    await installWindowsCliSignals()
+-  }
+   const runtimeDir = resolve(import.meta.dirname, '../../../..')
+   await runDesktopCli(runtimeDir, join(dirname(runtimeArchivePath(runtimeDir) ?? runtimeDir), 'runtime'))
+ }
 diff --git a/apps/desktop-host/src/index.ts b/apps/desktop-host/src/index.ts
 index 31bbbffe151c7311b4c593187084971ac7e93113..41ae3049d57755099c19341df40a23413c4eb39b 100644
 --- a/apps/desktop-host/src/index.ts
@@ -45,6 +583,89 @@ index 31bbbffe151c7311b4c593187084971ac7e93113..41ae3049d57755099c19341df40a2341
            DSH_DESKTOP_NODE_EXECUTABLE: process.execPath,
            PATH: `${process.argv[6] ?? ''}${delimiter}${process.env.PATH ?? ''}`,
          },
+diff --git a/apps/desktop/scripts/prepare-cli.ts b/apps/desktop/scripts/prepare-cli.ts
+index d2b9e14200c328907d7745461b2cb4ff40344b7d..730ec0cc9e8ffe7d691f591a681c08368cf7b47e 100644
+--- a/apps/desktop/scripts/prepare-cli.ts
++++ b/apps/desktop/scripts/prepare-cli.ts
+@@ -1,17 +1,46 @@
+ /** Package terminal launch scripts that reuse the installed Electron runtime. */
+ 
+-import { chmodSync, copyFileSync, mkdirSync } from 'node:fs'
++import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+ import { join } from 'node:path'
+ 
++/** Build-time launcher targets; neither target is overridable by the runtime environment. */
++export interface DesktopCliLauncherOptions {
++  /** Executable basename without .exe; omitted uses DeepSeek Harness. */
++  productName?: string
++  /** Forward-slash path relative to app.asar; omitted uses the official Desktop CLI entry. */
++  entry?: string
++}
++
++const DEFAULT_PRODUCT_NAME = 'DeepSeek Harness'
++const DEFAULT_ENTRY = 'dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js'
++
++// ASCII build-time names avoid cmd.exe code-page dependence; installation directories may be Unicode.
++function safeComponent(value: string): boolean {
++  return /^[A-Za-z0-9@_][A-Za-z0-9@_. -]*$/u.test(value) && value.trim() === value && !value.endsWith('.')
++}
++
+ /**
+- * Copy the platform launcher into the application's public command directory.
++ * Render the platform launcher into the application's public command directory without registering it.
+  * @param destination - Physical runtime/cli directory prepared for the application.
+  * @param platform - Target Desktop operating system.
++ * @param options - Build-time executable name and ASAR-relative entry; omitted fields use official defaults.
+  */
+-export function prepareDesktopCli(destination: string, platform: 'darwin' | 'win32'): void {
++export function prepareDesktopCli(destination: string, platform: 'darwin' | 'win32', options: DesktopCliLauncherOptions = {}): void {
++  const productName = options.productName ?? DEFAULT_PRODUCT_NAME
++  const entry = options.entry ?? DEFAULT_ENTRY
++  if (!safeComponent(productName)) throw new Error('desktop CLI: unsafe productName')
++  if (!entry.split('/').every(safeComponent)) throw new Error('desktop CLI: unsafe ASAR entry')
+   const name = platform === 'win32' ? 'dsh.cmd' : 'dsh'
++  const separator = platform === 'win32' ? '\\' : '/'
++  const template = readFileSync(join(import.meta.dirname, '..', 'cli', name), 'utf8')
++  const defaultEntry = DEFAULT_ENTRY.replaceAll('/', separator)
++  if (template.split(DEFAULT_PRODUCT_NAME).length !== 2 || template.split(defaultEntry).length !== 2) {
++    throw new Error('desktop CLI: launcher template must contain exactly one executable and ASAR entry')
++  }
++  const launcher = template.replace(DEFAULT_PRODUCT_NAME, productName)
++    .replace(defaultEntry, entry.replaceAll('/', separator))
+   const command = join(destination, 'bin', name)
+   mkdirSync(join(destination, 'bin'), { recursive: true })
+-  copyFileSync(join(import.meta.dirname, '..', 'cli', name), command)
++  writeFileSync(command, launcher)
+   if (platform === 'darwin') chmodSync(command, 0o755)
+ }
+diff --git a/apps/desktop/scripts/prepare-runtime.ts b/apps/desktop/scripts/prepare-runtime.ts
+index 4e338532721aae17610b3234468c6e7069fb665f..2e5229659dd003092906bf4311bbeb71cca7f772 100644
+--- a/apps/desktop/scripts/prepare-runtime.ts
++++ b/apps/desktop/scripts/prepare-runtime.ts
+@@ -1,7 +1,7 @@
+ /** Prepare Desktop resources and publish their versions after every preparation stage succeeds. */
+ 
+ import { execFileSync } from 'node:child_process'
+-import { chmodSync, cpSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
++import { chmodSync, cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+ import { createRequire } from 'node:module'
+ import { join } from 'node:path'
+ import { parseArgs } from 'node:util'
+@@ -37,7 +37,13 @@ function prepareCli({ platform, arch }: DesktopTarget): void {
+   cpSync(join(import.meta.dirname, 'node-bin'), join(RUNTIME_ROOT, 'bin'), { recursive: true })
+   chmodSync(join(RUNTIME_ROOT, 'bin', 'node'), 0o755)
+   const cli = join(RUNTIME_ROOT, 'cli')
+-  prepareDesktopCli(cli, platform)
++  const build: unknown = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'src', 'ium-build.json'), 'utf8'))
++  if (typeof build !== 'object' || build === null || !('identity' in build)
++    || typeof build.identity !== 'object' || build.identity === null || !('productName' in build.identity)
++    || typeof build.identity.productName !== 'string') {
++    throw new Error('desktop CLI: build identity has no productName')
++  }
++  prepareDesktopCli(cli, platform, { productName: build.identity.productName, entry: 'lib/ium-cli-bootstrap.js' })
+   if (platform === 'darwin') {
+     const minimumVersion = execFileSync('/usr/libexec/PlistBuddy', [
+       '-c', 'Print LSMinimumSystemVersion', join(BUILD_PATHS.electron, 'Electron.app', 'Contents', 'Info.plist'),
 diff --git a/apps/desktop/src/host-process.ts b/apps/desktop/src/host-process.ts
 index 338f93bda45cf06c6d0924d719595225b8f64841..e9480d669e2cc703967ff54e235f9e2ad103dc0a 100644
 --- a/apps/desktop/src/host-process.ts
@@ -85,6 +706,324 @@ index 338f93bda45cf06c6d0924d719595225b8f64841..e9480d669e2cc703967ff54e235f9e2a
        stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
      })
      this.child = child
+diff --git a/apps/desktop/tests/cli-launcher.spec.ts b/apps/desktop/tests/cli-launcher.spec.ts
+index 67e38da2564361c971d82f75248f49bcafdfed6e..97669c8831bbda051147c2a59edbf0bfd8a2056b 100644
+--- a/apps/desktop/tests/cli-launcher.spec.ts
++++ b/apps/desktop/tests/cli-launcher.spec.ts
+@@ -1,14 +1,19 @@
+ /** Installed launcher scripts preserve terminal invocation through a minimal runtime fixture. */
+ 
+ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+-import { copyFileSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
++import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+ import { rm } from 'node:fs/promises'
+ import { tmpdir } from 'node:os'
+ import { dirname, join, relative } from 'node:path'
+-import { expect, it, onTestFinished } from 'vitest'
+-import { prepareDesktopCli } from '../scripts/prepare-cli.ts'
++import { expect, it, onTestFinished, vi } from 'vitest'
++import { prepareDesktopCli, type DesktopCliLauncherOptions } from '../scripts/prepare-cli.ts'
+ 
+-function fixture() {
++vi.mock('node:fs', async (importOriginal) => {
++  const actual = await importOriginal<typeof import('node:fs')>()
++  return { ...actual, readFileSync: vi.fn(actual.readFileSync) }
++})
++
++function fixture(options: DesktopCliLauncherOptions = {}) {
+   const root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-cli-launcher-')))
+   const children: ChildProcessWithoutNullStreams[] = []
+   const exits: Promise<unknown>[] = []
+@@ -23,12 +28,13 @@ function fixture() {
+   const platform = process.platform === 'win32' ? 'win32' : 'darwin'
+   const resources = join(application, ...platform === 'darwin' ? ['Contents', 'Resources'] : ['resources'])
+   const cli = join(resources, 'runtime', 'cli')
+-  prepareDesktopCli(cli, platform)
+-  const electron = join(application, ...platform === 'darwin' ? ['Contents', 'MacOS', 'DeepSeek Harness'] : ['DeepSeek Harness.exe'])
++  prepareDesktopCli(cli, platform, options)
++  const productName = options.productName ?? 'DeepSeek Harness'
++  const electron = join(application, ...platform === 'darwin' ? ['Contents', 'MacOS', productName] : [`${productName}.exe`])
+   mkdirSync(dirname(electron), { recursive: true })
+   if (platform === 'win32') copyFileSync(process.execPath, electron)
+   else symlinkSync(process.execPath, electron)
+-  const entry = join(resources, 'app.asar', 'dsh', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'cli.js')
++  const entry = join(resources, 'app.asar', options.entry ?? 'dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js')
+   mkdirSync(dirname(entry), { recursive: true })
+   writeFileSync(join(dirname(entry), 'package.json'), '{"type":"module"}\n')
+   writeFileSync(entry, [
+@@ -62,8 +68,12 @@ function fixture() {
+   return { root, command, start }
+ }
+ 
+-it('preserves common arguments, cwd, environment, binary input, stderr and exit status', async () => {
+-  const f = fixture()
++it.each([
++  {},
++  { productName: 'DSH Ium', entry: 'lib/ium-cli-bootstrap.js' },
++  { productName: 'Fixture Product', entry: 'lib with spaces/cli bootstrap.js' },
++])('preserves arguments, cwd, environment, binary input, stderr and exit status with %j', async (options) => {
++  const f = fixture(options)
+   const args = ['plugin', '--profile', 'desktop', 'hello world', '中文 🚀', '']
+   const run = f.start(args)
+   const input = Buffer.from([0, 1, 10, 255])
+@@ -73,8 +83,10 @@ it('preserves common arguments, cwd, environment, binary input, stderr and exit
+   expect(run.stderr()).toBe('separate stderr\n')
+ })
+ 
+-it.skipIf(process.platform === 'win32')('resolves chained command symlinks without expanding argument contents', async () => {
+-  const f = fixture()
++it.skipIf(process.platform === 'win32').each([
++  {}, { productName: 'DSH Ium', entry: 'lib/ium-cli-bootstrap.js' },
++])('resolves chained command symlinks without expanding argument contents with %j', async (options) => {
++  const f = fixture(options)
+   const link = join(f.root, 'command-link')
+   const command = join(f.root, 'dsh')
+   symlinkSync(relative(f.root, f.command), link)
+@@ -85,3 +97,70 @@ it.skipIf(process.platform === 'win32')('resolves chained command symlinks witho
+   expect(await run.closed, run.stderr()).toBe(23)
+   expect(JSON.parse(run.stdout())).toMatchObject({ args, cwd: f.root, nodeMode: '1' })
+ })
++
++function renderDirectory() {
++  const root = mkdtempSync(join(tmpdir(), 'dsh-cli-render-'))
++  onTestFinished(() => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
++  return root
++}
++
++it.each(['win32', 'darwin'] as const)('retains the official %s launcher bytes and physical command name by default', (platform) => {
++  const root = renderDirectory()
++  prepareDesktopCli(root, platform)
++  const name = platform === 'win32' ? 'dsh.cmd' : 'dsh'
++  const command = join(root, 'bin', name)
++  expect(readFileSync(command)).toEqual(readFileSync(join(import.meta.dirname, '..', 'cli', name)))
++  if (process.platform !== 'win32' && platform === 'darwin') expect(statSync(command).mode & 0o777).toBe(0o755)
++})
++
++it.each(['win32', 'darwin'] as const)('renders only the build-owned executable and ASAR entry for %s', (platform) => {
++  const root = renderDirectory()
++  prepareDesktopCli(root, platform, { productName: 'DSH Ium', entry: 'lib/ium-cli-bootstrap.js' })
++  const command = readFileSync(join(root, 'bin', platform === 'win32' ? 'dsh.cmd' : 'dsh'), 'utf8')
++  expect(command).not.toContain('DeepSeek Harness')
++  expect(command).not.toContain('dsh-desktop-host')
++  if (platform === 'win32') {
++    expect(command).toContain('setlocal DisableDelayedExpansion')
++    expect(command).toContain('DSH Ium.exe" --expose-internals "%~dp0..\\..\\..\\app.asar\\lib\\ium-cli-bootstrap.js" %*')
++  } else {
++    expect(command).toContain('while [ -L "$launcher" ]; do')
++    expect(command).toContain('MacOS/DSH Ium" --expose-internals "$resources/app.asar/lib/ium-cli-bootstrap.js" "$@"')
++  }
++})
++
++it.each(['win32', 'darwin'] as const)('rejects drifted %s templates instead of silently retaining an unpatched entry', (platform) => {
++  const root = renderDirectory()
++  const template = readFileSync(join(import.meta.dirname, '..', 'cli', platform === 'win32' ? 'dsh.cmd' : 'dsh'), 'utf8')
++  for (const invalid of [template.replace('DeepSeek Harness', 'Different Product'), template.replace('cli.js', 'changed.js'), `${template}${template}`]) {
++    vi.mocked(readFileSync).mockReturnValueOnce(invalid)
++    expect(() => { prepareDesktopCli(root, platform, { productName: 'DSH Ium', entry: 'lib/ium-cli-bootstrap.js' }) })
++      .toThrow('launcher template must contain exactly one executable and ASAR entry')
++  }
++  expect(existsSync(join(root, 'bin'))).toBe(false)
++})
++
++const unsafeComponents = [
++  '', '.', '..', '../escape', '..\\escape', 'one/two', 'one\\two', '/absolute', 'C:\\absolute',
++  'quote"', "quote'", '%PATH%', '!variable!', '$HOME', '$(touch injected)', '`command`',
++  'name&command', 'name|command', 'name;command', 'name^command', 'name>file', 'name<file',
++  'name\rcommand', 'name\ncommand', 'name\u0000command', 'name\tcommand', 'name ', 'name.',
++  'name\n', 'name\r\n', 'name\u2028',
++]
++
++it.each(unsafeComponents)('rejects unsafe build-time productName %j before writing a launcher', (productName) => {
++  const root = renderDirectory()
++  for (const platform of ['win32', 'darwin'] as const) {
++    expect(() => { prepareDesktopCli(root, platform, { productName }) }).toThrow('unsafe productName')
++  }
++  expect(existsSync(join(root, 'bin'))).toBe(false)
++})
++
++it.each([
++  ...unsafeComponents.filter(value => value !== 'one/two'), 'lib/../entry.js', 'lib/./entry.js', 'lib//entry.js', 'lib/',
++])('rejects unsafe ASAR entry %j before writing a launcher', (entry) => {
++  const root = renderDirectory()
++  for (const platform of ['win32', 'darwin'] as const) {
++    expect(() => { prepareDesktopCli(root, platform, { entry }) }).toThrow('unsafe ASAR entry')
++  }
++  expect(existsSync(join(root, 'bin'))).toBe(false)
++})
+diff --git a/apps/desktop/tests/cli-runtime-identity.spec.ts b/apps/desktop/tests/cli-runtime-identity.spec.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..e7bcaf4a6ae0d8d30901fce3d15550a0af8f7ee8
+--- /dev/null
++++ b/apps/desktop/tests/cli-runtime-identity.spec.ts
+@@ -0,0 +1,61 @@
++/** Runtime preparation consumes the declared public identity without launching or downloading a runtime. */
++
++import { join } from 'node:path'
++import { tmpdir } from 'node:os'
++import { readFileSync, writeFileSync } from 'node:fs'
++import { afterEach, beforeEach, expect, it, vi } from 'vitest'
++import { prepareDesktopCli } from '../scripts/prepare-cli.ts'
++
++const state = vi.hoisted(() => ({ build: {} as object }))
++vi.mock('../scripts/desktop-build-paths.mjs', () => ({
++  desktopTargetPlatform: () => ({ platform: 'win32', arch: 'x64' }),
++  resolveDesktopBuildTarget: () => 'win-x64',
++  resolveDesktopTargetBuildPaths: () => ({
++    runtime: join(tmpdir(), 'cli-identity-fixture', 'runtime'),
++    electron: join(tmpdir(), 'cli-identity-fixture', 'electron'),
++    downloads: join(tmpdir(), 'cli-identity-fixture', 'downloads'),
++  }),
++}))
++vi.mock('node:fs', async importOriginal => ({
++  ...await importOriginal<typeof import('node:fs')>(),
++  readFileSync: vi.fn(() => JSON.stringify(state.build)),
++  chmodSync: vi.fn(), cpSync: vi.fn(), mkdirSync: vi.fn(), rmSync: vi.fn(), writeFileSync: vi.fn(),
++}))
++vi.mock('node:child_process', () => ({ execFileSync: () => '24.18.1\n' }))
++vi.mock('@electron/get', () => ({ downloadArtifact: async () => 'unused-electron.zip' }))
++vi.mock('extract-zip', () => ({ default: vi.fn() }))
++vi.mock('../scripts/prepare-primary-runtime.ts', () => ({ preparePrimaryRuntime: vi.fn() }))
++vi.mock('../../../packages/skill/tool-workspace-dependencies/src/index.ts', () => ({
++  readPrimaryRuntime: async () => ({ pnpm: '11.28.5' }),
++}))
++vi.mock('../scripts/prepare-cli.ts', () => ({ prepareDesktopCli: vi.fn() }))
++vi.mock('../scripts/prepare-command-link.ts', () => ({ prepareCommandLink: vi.fn() }))
++vi.mock('../scripts/packaging-step.mjs', () => ({
++  packagingStep: async (_run: string | undefined, _stage: string, operation: () => unknown) => operation(),
++}))
++
++const originalArgv = process.argv
++beforeEach(() => {
++  vi.resetModules()
++  vi.clearAllMocks()
++  process.argv = [process.execPath, 'prepare-runtime.ts']
++  state.build = { identity: { productName: 'Fixture Product' } }
++})
++afterEach(() => { process.argv = originalArgv })
++
++it('takes the launcher product from the overlay identity and uses the immutable bootstrap entry', async () => {
++  await import('../scripts/prepare-runtime.ts')
++  expect(readFileSync).toHaveBeenCalledWith(join(import.meta.dirname, '..', 'src', 'ium-build.json'), 'utf8')
++  expect(prepareDesktopCli).toHaveBeenCalledExactlyOnceWith(join(tmpdir(), 'cli-identity-fixture', 'runtime', 'cli'), 'win32', {
++    productName: 'Fixture Product', entry: 'lib/ium-cli-bootstrap.js',
++  })
++})
++
++it.each([
++  {}, { identity: null }, { identity: {} }, { identity: { productName: 23 } },
++])('rejects malformed build identity %j instead of using a fallback product', async (build) => {
++  state.build = build
++  await expect(import('../scripts/prepare-runtime.ts')).rejects.toThrow('build identity has no productName')
++  expect(prepareDesktopCli).not.toHaveBeenCalled()
++  expect(writeFileSync).not.toHaveBeenCalled()
++})
+diff --git a/apps/desktop/tests/desktop-cli.spec.ts b/apps/desktop/tests/desktop-cli.spec.ts
+index e358df86571b8e73088491fa17450a5dd709235d..b265af11d658e71a9f19d92cc9f29ebb0abe38e2 100644
+--- a/apps/desktop/tests/desktop-cli.spec.ts
++++ b/apps/desktop/tests/desktop-cli.spec.ts
+@@ -1,20 +1,26 @@
+ /** The installed CLI uses the shared pnpm distribution with Electron's package-operation environment. */
+ 
+-import { delimiter, join } from 'node:path'
+-import { afterEach, expect, it, vi } from 'vitest'
++import { delimiter, join, resolve } from 'node:path'
++import { pathToFileURL } from 'node:url'
++import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+ import { runCli } from '@deepseek-ai/dsh/lib/bin.js'
+-import { runDesktopCli } from '../../desktop-host/src/cli.ts'
+ import { installOfficeEngineResolution } from '../../desktop-host/src/office-engine.ts'
++import { installWindowsCliSignals } from '../../desktop-host/src/windows-cli-signals.ts'
+ 
+ vi.mock('@deepseek-ai/dsh/lib/bin.js', () => ({ runCli: vi.fn() }))
+ vi.mock('../../desktop-host/src/office-engine.ts', () => ({ installOfficeEngineResolution: vi.fn() }))
++vi.mock('../../desktop-host/src/windows-cli-signals.ts', () => ({ installWindowsCliSignals: vi.fn() }))
++
++beforeEach(() => { vi.resetModules() })
+ 
+ afterEach(() => {
+   vi.unstubAllEnvs()
+-  vi.clearAllMocks()
++  vi.unstubAllGlobals()
++  vi.resetAllMocks()
+ })
+ 
+ it.each(['system-bin', undefined])('dispatches with bundled pnpm when PATH is %s', async (path) => {
++  const { runDesktopCli } = await import('../../desktop-host/src/cli.ts')
+   vi.stubEnv('PATH', path)
+   const runtime = join('Application 中文 with spaces', 'resources', 'app.asar', 'dsh')
+   const support = join('Application 中文 with spaces', 'resources', 'runtime')
+@@ -35,3 +41,71 @@ it.each(['system-bin', undefined])('dispatches with bundled pnpm when PATH is %s
+     },
+   })
+ })
++
++it('forwards deployment patches and explicitly preloads pnpm with the resolved home', async () => {
++  const { runDesktopCli } = await import('../../desktop-host/src/cli.ts')
++  const runtime = resolve('Application 中文 with spaces', 'resources', 'app.asar', 'dsh')
++  const support = resolve('Application 中文 with spaces', 'resources', 'runtime')
++  const deploymentPatchFiles = [join(runtime, 'ium-work.cordis.yml')] as const
++  const networkPreload = pathToFileURL(join(support, 'ium-node-preload.js')).href
++  vi.stubEnv('PATH', 'retained-bin')
++  vi.stubEnv('DSH_HOME', 'isolated cli home')
++  vi.stubEnv('IUM_NETWORK_PRELOAD', 'ignored-environment-preload')
++
++  await runDesktopCli(runtime, support, { deploymentPatchFiles, networkPreload })
++
++  expect(runCli).toHaveBeenCalledExactlyOnceWith({
++    manageDesktopProfile: true,
++    deploymentPatchFiles,
++    packageManager: {
++      command: process.execPath,
++      args: ['--import', networkPreload, '--expose-internals', join(support, 'primary-runtime', 'dependencies', 'pnpm', 'bin', 'pnpm.mjs')],
++      env: {
++        ELECTRON_RUN_AS_NODE: '1',
++        DSH_HOME: resolve('isolated cli home'),
++        DSH_DESKTOP_NODE_EXECUTABLE: process.execPath,
++        PATH: `${join(support, 'bin')}${delimiter}retained-bin`,
++      },
++    },
++  })
++})
++
++it('installs Windows signals once before concurrently invoked imported commands', async () => {
++  vi.stubGlobal('process', { ...process, platform: 'win32' })
++  const installing = Promise.withResolvers<undefined>()
++  const installed = Promise.withResolvers<undefined>()
++  vi.mocked(installWindowsCliSignals).mockImplementation(() => {
++    installing.resolve(undefined)
++    return installed.promise
++  })
++  const { runDesktopCli } = await import('../../desktop-host/src/cli.ts')
++  expect(installWindowsCliSignals).not.toHaveBeenCalled()
++  const first = runDesktopCli('runtime', 'support')
++  const second = runDesktopCli('runtime', 'support')
++  await installing.promise
++  expect(runCli).not.toHaveBeenCalled()
++  installed.resolve(undefined)
++  await Promise.all([first, second])
++  await runDesktopCli('runtime', 'support')
++  expect(installWindowsCliSignals).toHaveBeenCalledOnce()
++  expect(runCli).toHaveBeenCalledTimes(3)
++})
++
++it('does not dispatch when Windows signal installation fails or reinstall it later', async () => {
++  vi.stubGlobal('process', { ...process, platform: 'win32' })
++  vi.mocked(installWindowsCliSignals).mockRejectedValue(new Error('console registration failed'))
++  const { runDesktopCli } = await import('../../desktop-host/src/cli.ts')
++  await expect(runDesktopCli('runtime', 'support')).rejects.toThrow('console registration failed')
++  await expect(runDesktopCli('runtime', 'support')).rejects.toThrow('console registration failed')
++  expect(installWindowsCliSignals).toHaveBeenCalledOnce()
++  expect(installOfficeEngineResolution).not.toHaveBeenCalled()
++  expect(runCli).not.toHaveBeenCalled()
++})
++
++it('does not install Windows signals for a POSIX imported command', async () => {
++  vi.stubGlobal('process', { ...process, platform: 'darwin' })
++  const { runDesktopCli } = await import('../../desktop-host/src/cli.ts')
++  await runDesktopCli('runtime', 'support', { deploymentPatchFiles: [] })
++  expect(installWindowsCliSignals).not.toHaveBeenCalled()
++  expect(runCli).toHaveBeenCalledWith(expect.objectContaining({ deploymentPatchFiles: [] }))
++})
 diff --git a/apps/desktop/tests/host-process.spec.ts b/apps/desktop/tests/host-process.spec.ts
 index 9a72fd2925eb5afdeb73c59ee873623c8c744e20..d41b67771f66ea1ca158f0e8263cb8b890264909 100644
 --- a/apps/desktop/tests/host-process.spec.ts
@@ -120,16 +1059,17 @@ index 9a72fd2925eb5afdeb73c59ee873623c8c744e20..d41b67771f66ea1ca158f0e8263cb8b8
      const runtime = projectWithHost(`
  process.send({ type: 'starting', runId: 'c254ab28-97c9-4382-95e6-2db9c66f98c8' })
 diff --git a/apps/desktop/tsdown.config.ts b/apps/desktop/tsdown.config.ts
-index 40ed1a0316ab455e452318786cb436186f267288..389ebf242272bd4958120871157dc00799b03edb 100644
+index 40ed1a0316ab455e452318786cb436186f267288..e1c866043e84dbc42013cbf956a7d32212b35fe9 100644
 --- a/apps/desktop/tsdown.config.ts
 +++ b/apps/desktop/tsdown.config.ts
-@@ -33,6 +33,17 @@ if (clientVersion === undefined) throw new Error('desktop build: the client envi
+@@ -33,6 +33,18 @@ if (clientVersion === undefined) throw new Error('desktop build: the client envi
  const clientVersionDefine = { 'process.env.DSH_CLIENT_VERSION': JSON.stringify(clientVersion) }
  
  export default defineConfig([
 +  {
 +    entry: {
 +      'ium-bootstrap': 'src/ium-bootstrap.mjs',
++      'ium-cli-bootstrap': 'src/ium-cli-bootstrap.mjs',
 +      'ium-node-preload': 'src/ium-node-preload.mjs',
 +      'ium-network-policy': 'src/ium-network-policy.mjs',
 +    },

@@ -35,6 +35,18 @@
     {
       "file": "0002-early-network-policy-and-profile.patch",
       "paths": [
+        "apps/cli/src/args.ts",
+        "apps/cli/src/bin.ts",
+        "apps/cli/src/dump-config.ts",
+        "apps/cli/src/dump-config-schema.ts",
+        "apps/cli/tests/deployment-patches.spec.ts",
+        "apps/cli/tests/resolved-profile-boot.spec.ts",
+        "apps/desktop/scripts/prepare-cli.ts",
+        "apps/desktop/scripts/prepare-runtime.ts",
+        "apps/desktop/tests/cli-launcher.spec.ts",
+        "apps/desktop/tests/cli-runtime-identity.spec.ts",
+        "apps/desktop/tests/desktop-cli.spec.ts",
+        "apps/desktop-host/src/cli.ts",
         "apps/desktop/src/host-process.ts",
         "apps/desktop/tests/host-process.spec.ts",
         "apps/desktop/tsdown.config.ts",

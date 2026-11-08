@@ -24,8 +24,8 @@ node scripts/test-upstream.mjs
 node scripts/compile.mjs
 node scripts/prepare-electron.mjs
 node scripts/native-smoke.mjs --compiled
-node scripts/build-windows.mjs --build-version 0.2.2-rc.1.20261107.1 --check
-node scripts/build-windows.mjs --build-version 0.2.2-rc.1.20261107.1 --dir
+node scripts/build-windows.mjs --build-version 0.2.2-rc.1.20261108.1 --check
+node scripts/build-windows.mjs --build-version 0.2.2-rc.1.20261108.1 --dir
 ```
 
 The version is an explicit candidate example. Check retained and published versions before choosing a new one; do not use `auto`. The wrapper generates an ignored Windows build configuration containing only Ium's application ID. It refuses to overwrite a different existing configuration.
