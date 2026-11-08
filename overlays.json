@@ -5,6 +5,7 @@
     { "source": "overlays/desktop/ium-identity.mjs", "target": "apps/desktop/src/ium-identity.mjs" },
     { "source": "overlays/desktop/ium-audit.mjs", "target": "apps/desktop/src/ium-audit.mjs" },
     { "source": "overlays/desktop/ium-bootstrap.mjs", "target": "apps/desktop/src/ium-bootstrap.mjs" },
+    { "source": "overlays/desktop/ium-cli-bootstrap.mjs", "target": "apps/desktop/src/ium-cli-bootstrap.mjs" },
     { "source": "overlays/desktop/ium-node-preload.mjs", "target": "apps/desktop/src/ium-node-preload.mjs" },
     { "source": "profiles/work.json", "target": "apps/desktop/src/ium-build.json" },
     { "source": "profiles/work.cordis.yml", "target": "apps/desktop-host/ium-work.cordis.yml" }

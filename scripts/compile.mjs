@@ -25,7 +25,7 @@ export function compileArtifacts(options = {}) {
     execute(process.execPath, [entry, 'run', 'build:artifacts', '--profile', 'local'], { cwd: upstreamDirectory, env });
     execute(process.execPath, [entry, 'run', 'build:check'], { cwd: upstreamDirectory, env });
     const directory = path.join(upstreamDirectory, 'apps/desktop/lib');
-    const names = new Set(['main.js', 'ium-bootstrap.js', 'ium-node-preload.js', 'ium-network-policy.js']);
+    const names = new Set(['main.js', 'ium-bootstrap.js', 'ium-cli-bootstrap.js', 'ium-node-preload.js', 'ium-network-policy.js']);
     for (const name of fs.readdirSync(directory)) if (/^ium-.*\.js$/.test(name)) names.add(name);
     const artifactHashes = Object.fromEntries([...names].sort().map(name => ['apps/desktop/lib/' + name, hashFile(path.join(directory, name))]));
     return receipt.pass({ artifactHashes, artifactHashScope: 'Desktop compiled entries and Ium chunks' });
