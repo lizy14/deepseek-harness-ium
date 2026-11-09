@@ -1,0 +1,82 @@
+# Template: enable by placing this file at .github/workflows/windows-build.yml.
+# Updating Actions definitions requires a GitHub credential with workflow permission.
+name: DSH Ium Windows candidate
+on:
+  workflow_dispatch:
+    inputs:
+      build_version:
+        description: Explicit unpublished candidate version based on upstream.lock.json
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      IUM_BUILD_VERSION: ${{ inputs.build_version }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 24.21.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: 3.12.14
+      - name: Prepare immutable inputs
+        run: |
+          node scripts/toolchain.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/upstream.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/apply.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/dependencies.mjs --build-reviewed-deps
+          exit $LASTEXITCODE
+      - name: Run offline and source regressions
+        run: |
+          node --test --test-isolation=none --test-concurrency=1 'tests/*.test.mjs'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test --test-isolation=none --test-concurrency=1 tests/fixtures/gui-smoke/self-test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/test-upstream.mjs
+          exit $LASTEXITCODE
+      - name: Compile artifacts and aggregate types
+        run: node scripts/compile.mjs
+      - name: Qualify native policy without external networking
+        run: |
+          node scripts/prepare-electron.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/native-smoke.mjs --compiled
+          exit $LASTEXITCODE
+      - name: Check Windows packaging prerequisites
+        run: node scripts/build-windows.mjs --build-version "$env:IUM_BUILD_VERSION" --check
+      - name: Build unsigned directory candidate
+        run: node scripts/build-windows.mjs --build-version "$env:IUM_BUILD_VERSION" --dir
+      - name: Archive candidate
+        run: |
+          $source = '.work/upstream/apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked'
+          if (!(Test-Path -LiteralPath "$source/DSH Ium.exe")) { throw 'Ium directory artifact is missing.' }
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          Compress-Archive -Path "$source/*" -DestinationPath "artifacts/dsh-ium-$env:IUM_BUILD_VERSION-win-x64-unsigned.zip"
+          Get-FileHash -Algorithm SHA256 'artifacts/*.zip' | Select-Object Hash, @{Name='File';Expression={Split-Path -Leaf $_.Path}} | ConvertTo-Json | Set-Content -Encoding utf8 'artifacts/checksums.json'
+      - name: Upload candidate and bounded validation records
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dsh-ium-${{ inputs.build_version }}-win-x64-unsigned-candidate
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            artifacts/*.zip
+            artifacts/checksums.json
+            .work/source-verification.json
+            .work/compile-result.json
+            .work/focused-test-result.json
+            .work/native-smoke-result.json
+            .work/packaged-verification.json
