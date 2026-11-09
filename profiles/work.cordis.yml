@@ -1,0 +1,39 @@
+# Immutable final deployment overlay for the Ium work edition.
+# User credentials, provider choices and model preferences remain in the isolated user profile.
+- id: workspace-controller
+  config:
+    documentsDirectory: !!js dshHomePath('workspaces')
+- id: session-log-deepseek
+  config:
+    enabled: false
+- id: plugin-package-inventory-deepseek
+  config:
+    enabled: false
+- id: session-telemetry-otel
+  config:
+    mode: DISABLED
+    exporter: {}
+    processor: {}
+    shutdownTimeoutMillis: 3000
+    maxRequestBytes: 4000000
+- id: product-analytics
+  config:
+    enabled: false
+    appVersion: !!js process.env.DSH_CLIENT_VERSION
+- id: llm-deepseek
+  disabled: true
+- id: llm-deepseek-account
+  disabled: true
+- id: web-search-deepseek
+  disabled: true
+- id: web-deepseek-api
+  disabled: true
+- id: ui-settings-account
+  disabled: true
+- id: ui-settings-models
+  config:
+    credentialOnboarding: false
+- id: ui-message-feedback
+  disabled: true
+- id: command-feedback
+  disabled: true

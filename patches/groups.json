@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "groups": [
+    {
+      "file": "0001-desktop-identity-and-update-policy.patch",
+      "paths": [
+        "apps/desktop/package.json",
+        "apps/desktop/electron-builder.config.d.mts",
+        "apps/desktop/scripts/desktop-package-environment.mjs",
+        "apps/desktop/scripts/desktop-release-environment.mjs",
+        "apps/desktop/scripts/desktop-release-environment.d.mts",
+        "apps/desktop/scripts/electron-builder-config.mjs",
+        "apps/desktop/scripts/package-macos.ts",
+        "apps/desktop/scripts/package-target.ts",
+        "apps/desktop/scripts/smoke-packaged-runtime.ts",
+        "apps/desktop/scripts/verify-retained-desktop.ts",
+        "apps/desktop/src/main.ts",
+        "apps/desktop/tests/desktop-package-environment.spec.ts",
+        "apps/desktop/tests/installer-packaging.spec.ts",
+        "apps/desktop/tests/macos-signature.spec.ts",
+        "apps/desktop/tests/main-startup.spec.ts",
+        "apps/desktop/tests/package-macos.spec.ts",
+        "package.json",
+        "packages/client/tsdown.client.ts",
+        "packages/experimental/inspector/scripts/devtools/vite.ts",
+        "packages/experimental/inspector/tests/devtools-build.host.spec.ts",
+        "scripts/client-bundle-purity.spec.ts",
+        "scripts/ci-workflow.spec.ts",
+        "scripts/compile-referenced-projects.spec.ts",
+        "scripts/compile-referenced-projects.ts",
+        "scripts/run-gates.spec.ts",
+        "scripts/run-gates.ts"
+      ]
+    },
+    {
+      "file": "0002-early-network-policy-and-profile.patch",
+      "paths": [
+        "apps/cli/src/args.ts",
+        "apps/cli/src/bin.ts",
+        "apps/cli/src/dump-config.ts",
+        "apps/cli/src/dump-config-schema.ts",
+        "apps/cli/tests/deployment-patches.spec.ts",
+        "apps/cli/tests/resolved-profile-boot.spec.ts",
+        "apps/desktop/scripts/prepare-cli.ts",
+        "apps/desktop/scripts/prepare-runtime.ts",
+        "apps/desktop/tests/cli-launcher.spec.ts",
+        "apps/desktop/tests/cli-runtime-identity.spec.ts",
+        "apps/desktop/tests/desktop-cli.spec.ts",
+        "apps/desktop-host/src/cli.ts",
+        "apps/desktop/src/host-process.ts",
+        "apps/desktop/tests/host-process.spec.ts",
+        "apps/desktop/tsdown.config.ts",
+        "apps/desktop-host/package.json",
+        "apps/desktop-host/src/index.ts",
+        "pnpm-lock.yaml"
+      ]
+    }
+  ]
+}
